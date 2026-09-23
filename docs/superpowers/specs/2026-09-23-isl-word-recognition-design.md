@@ -175,8 +175,10 @@ For every video in the three INCLUDE-50 splits (processed test first, then val, 
    come first, examples are test videos; the one word missing from the test split gets a val video.
 
 Errors on one video are logged to `data/failed.txt` and the run continues. The run prints progress and a summary.
-Peak disk use is one video plus the examples folder (about 0.8 GB).
-Expected cost: ~15 GB download, ~1 hour of CPU extraction.
+Zenodo gives each connection only about 0.3 MB/s (measured; 8 parallel connections reached 4.2 MB/s), so videos
+are **downloaded 8 at a time**, at most 16 ahead of the one being processed, while extraction stays sequential and in
+order. Peak disk use is about 16 videos (~250 MB) plus the examples folder (about 0.8 GB).
+Expected cost: ~15 GB download, ~1–1.5 hours in total.
 
 ### `isl/model.py`
 
