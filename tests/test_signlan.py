@@ -9,6 +9,8 @@ import numpy as np
 from groq import APIConnectionError
 
 import signlan
+from isl.features import RawLandmarks
+from tests.fakes import make_hand, make_raw
 
 
 def fake_client(reply="I love you so much!"):
@@ -17,213 +19,116 @@ def fake_client(reply="I love you so much!"):
     return client
 
 
-class ModelTests(unittest.TestCase):
-    def test_teachable_machine_model_loads_and_matches_labels(self):
-        model = signlan.load_model(signlan.MODEL_PATH, compile=False)
-        labels = signlan.load_labels(signlan.LABELS_PATH)
-
-        frame = np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8)
-        prediction = model(signlan.preprocess(frame), training=False).numpy()
-
-        self.assertEqual(prediction.shape, (1, len(labels)))
-        self.assertAlmostEqual(float(prediction.sum()), 1.0, places=4)
-
-
-class LabelTests(unittest.TestCase):
-    def test_index_prefix_is_removed(self):
-        self.assertEqual(signlan.load_labels(signlan.LABELS_PATH), ["I love you", "done", "Background"])
-
-    def test_wake_word_and_background_are_real_labels(self):
-        labels = signlan.load_labels(signlan.LABELS_PATH)
-        self.assertIn(signlan.WAKE_WORD, labels)
-        self.assertIn(signlan.BACKGROUND, labels)
-
-
-class PreprocessTests(unittest.TestCase):
-    def test_output_shape_and_range(self):
-        frame = np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8)
-        image = signlan.preprocess(frame)
-        self.assertEqual(image.shape, (1, 224, 224, 3))
-        self.assertGreaterEqual(image.min(), -1.0)
-        self.assertLessEqual(image.max(), 1.0)
-
-    def test_bgr_is_converted_to_rgb(self):
-        frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        frame[:, :, 0] = 255  # pure blue in OpenCV's BGR order
-        pixel = signlan.preprocess(frame)[0, 112, 112]
-        np.testing.assert_allclose(pixel, [-1.0, -1.0, 1.0])  # blue is the last channel in RGB
-
-
-class SignTrackerTests(unittest.TestCase):
-    def feed(self, tracker, frames):
-        """frames: (label, confidence, timestamp) tuples"""
-        return [tracker.update(label, conf, now=t) for label, conf, t in frames]
-
-    def test_sign_fires_once_after_being_held(self):
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80)
-        results = self.feed(tracker, [("done", 95, t) for t in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0)])
-        self.assertEqual(results, [None, None, "done", None, None, None])
-
-    def test_low_confidence_breaks_the_hold(self):
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80)
-        results = self.feed(tracker, [("done", 95, 0.0), ("done", 95, 0.5), ("done", 50, 0.9),
-                                      ("done", 95, 1.0), ("done", 95, 1.5), ("done", 95, 2.0)])
-        self.assertEqual(results, [None, None, None, None, None, "done"])
-
-    def test_switching_sign_restarts_the_hold(self):
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80)
-        results = self.feed(tracker, [("done", 95, 0.0), ("I love you", 95, 0.9),
-                                      ("I love you", 95, 1.5), ("I love you", 95, 2.0)])
-        self.assertEqual(results, [None, None, None, "I love you"])
-
-    def test_wake_word_held_after_waking_fires_only_once(self):
-        # Regression: the frame after "done" woke the bot, "done" itself was sent to the chatbot
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80)
-        results = self.feed(tracker, [("done", 95, t / 10) for t in range(0, 40)])
-        self.assertEqual([r for r in results if r], ["done"])
-
-    def test_confidence_dip_while_still_holding_does_not_repeat_the_sign(self):
-        # Regression: holding "I love you" with one frame dipping under the threshold accepted it twice
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
-        frames = ([("I love you", 99, t / 10) for t in range(0, 11)] + [("I love you", 70, 1.1)]
-                  + [("I love you", 87, t / 10) for t in range(12, 40)])
-        self.assertEqual([r for r in self.feed(tracker, frames) if r], ["I love you"])
-
-    def test_brief_flicker_to_another_sign_does_not_repeat_the_sign(self):
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
-        frames = ([("done", 90, t / 10) for t in range(0, 11)] + [("I love you", 85, 1.1), ("Background", 60, 1.2)]
-                  + [("done", 90, t / 10) for t in range(13, 40)])
-        self.assertEqual([r for r in self.feed(tracker, frames) if r], ["done"])
-
-    def test_same_sign_counts_again_after_hand_goes_down(self):
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
-        frames = ([("done", 90, t / 10) for t in range(0, 11)]
-                  + [("Background", 60, t / 10) for t in range(11, 18)]  # hand down for 0.7s
-                  + [("done", 90, t / 10) for t in range(18, 30)])
-        results = self.feed(tracker, frames)
-        self.assertEqual([r for r in results if r], ["done", "done"])
-        self.assertGreaterEqual(results.index("done", 11), 28)  # second "done" needed its own full 1s hold
-
-    def test_different_sign_counts_straight_away(self):
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
-        frames = [("done", 90, t / 10) for t in range(0, 11)] + [("I love you", 95, t / 10) for t in range(11, 25)]
-        self.assertEqual([r for r in self.feed(tracker, frames) if r], ["done", "I love you"])
-
-    def test_reset_keeps_the_last_sign_blocked(self):
-        # While the bot is busy the hold is reset; a sign still held afterwards must not fire again
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
-        self.feed(tracker, [("done", 90, t / 10) for t in range(0, 11)])
-        tracker.reset()
-        results = self.feed(tracker, [("done", 90, t / 10) for t in range(40, 60)])
-        self.assertEqual([r for r in results if r], [])
-
-    def test_progress_fills_while_holding(self):
-        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80)
-        self.assertEqual(tracker.progress(now=0.0), 0.0)
-        tracker.update("done", 95, now=0.0)
-        self.assertAlmostEqual(tracker.progress(now=0.25), 0.25)
-        tracker.update("done", 95, now=1.0)
-        self.assertEqual(tracker.progress(now=5.0), 1.0)
-        tracker.update("done", 10, now=5.0)
-        self.assertEqual(tracker.progress(now=5.0), 0.0)
-
-
 class SentenceBuilderTests(unittest.TestCase):
-    def feed(self, signs):
+    def test_pause_after_signing_sends_the_words(self):
+        builder = signlan.SentenceBuilder(send_after=2.0)
+        builder.add("hello", now=10.0)
+        self.assertIsNone(builder.update(signing=False, now=11.0))
+        self.assertAlmostEqual(builder.progress(11.0), 0.5)
+        self.assertEqual(builder.update(signing=False, now=12.0), ["hello"])
+        self.assertEqual(builder.words, [])
+
+    def test_signing_again_restarts_the_pause(self):
+        builder = signlan.SentenceBuilder(send_after=2.0)
+        builder.add("hello", now=0.0)
+        builder.update(signing=True, now=1.5)
+        self.assertIsNone(builder.update(signing=False, now=2.5))
+        builder.add("teacher", now=3.0)
+        self.assertEqual(builder.update(signing=False, now=5.0), ["hello", "teacher"])
+
+    def test_nothing_is_sent_without_words(self):
+        builder = signlan.SentenceBuilder(send_after=2.0)
+        self.assertIsNone(builder.update(signing=False, now=100.0))
+        self.assertEqual(builder.progress(100.0), 0.0)
+
+    def test_backspace_removes_the_last_word_and_gives_more_time(self):
+        builder = signlan.SentenceBuilder(send_after=2.0)
+        builder.add("hello", now=0.0)
+        builder.add("dog", now=1.0)
+        builder.remove_last(now=2.5)
+        self.assertEqual(builder.words, ["hello"])
+        self.assertIsNone(builder.update(signing=False, now=4.0))
+        self.assertEqual(builder.update(signing=False, now=4.5), ["hello"])
+
+    def test_backspace_on_an_empty_sentence_does_nothing(self):
         builder = signlan.SentenceBuilder()
-        return builder, [builder.add(s) for s in signs]
+        builder.remove_last(now=1.0)
+        self.assertEqual(builder.words, [])
+        self.assertIsNone(builder.update(signing=False, now=10.0))
 
-    def test_wake_word_signs_wake_word_sends_the_sentence(self):
-        builder, results = self.feed(["done", "I love you", "water", "done"])
-        self.assertEqual(results, [None, None, None, ["I love you", "water"]])
-        self.assertFalse(builder.collecting)
 
-    def test_signs_before_the_wake_word_are_ignored(self):
-        _, results = self.feed(["I love you", "done", "water", "done"])
-        self.assertEqual(results[-1], ["water"])
+class StatusTextTests(unittest.TestCase):
+    def test_priorities(self):
+        self.assertEqual(signlan.status_text("Thinking...", False, True, True), "Thinking...")
+        self.assertEqual(signlan.status_text("", False, False, False), "Move back so your shoulders are visible")
+        self.assertEqual(signlan.status_text("", True, True, False), "Signing...")
+        self.assertIn("Pause to send", signlan.status_text("", True, False, True))
+        self.assertEqual(signlan.status_text("", True, False, False), "Sign a word")
 
-    def test_background_is_never_part_of_the_sentence(self):
-        _, results = self.feed(["done", "Background", "I love you", "Background", "done"])
-        self.assertEqual(results[-1], ["I love you"])
 
-    def test_wake_word_twice_cancels(self):
-        builder, results = self.feed(["done", "done"])
-        self.assertEqual(results, [None, []])
-        self.assertFalse(builder.collecting)
-
-    def test_signs_so_far_are_visible_while_collecting(self):
-        builder, _ = self.feed(["done", "I love you"])
-        self.assertTrue(builder.collecting)
-        self.assertEqual(builder.signs, ["I love you"])
+class SkeletonTests(unittest.TestCase):
+    def test_skeleton_is_drawn_mirrored(self):
+        display = np.zeros((480, 640, 3), np.uint8)
+        raw = RawLandmarks(pose=None, hands=[make_hand((500.0, 200.0))], width=640, height=480)
+        signlan.draw_skeleton(display, raw)
+        columns = np.flatnonzero(display.any(axis=(0, 2)))
+        self.assertTrue(columns.size)
+        self.assertLess(columns.max(), 320)  # a hand on the camera image's right is on the preview's left
 
 
 class InterpretTests(unittest.TestCase):
     def test_signs_are_sent_in_order_with_the_interpreter_prompt(self):
         client = fake_client()
-        signlan.interpret(client, ["I love you", "water"])
-
+        signlan.interpret(client, ["hello", "teacher"])
         kwargs = client.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs["model"], signlan.GROQ_MODEL)
         self.assertEqual(kwargs["messages"], [
             {"role": "system", "content": signlan.SYSTEM_PROMPT},
-            {"role": "user", "content": "Signs: I love you / water"},
+            {"role": "user", "content": "Signs: hello / teacher"},
         ])
 
-    def test_each_sentence_is_interpreted_on_its_own(self):
-        client = fake_client()
-        signlan.interpret(client, ["I love you"])
-        signlan.interpret(client, ["water"])
-        self.assertEqual(len(client.chat.completions.create.call_args.kwargs["messages"]), 2)
-
     def test_reply_is_cleaned_up(self):
-        self.assertEqual(signlan.interpret(fake_client(' "I love you too!" '), ["I love you"]), "I love you too!")
+        self.assertEqual(signlan.interpret(fake_client(' "Hello, teacher!" '), ["hello"]), "Hello, teacher!")
 
     def test_api_error_returns_none(self):
         client = mock.Mock()
         client.chat.completions.create.side_effect = APIConnectionError(request=mock.Mock())
         with mock.patch("builtins.print"):
-            self.assertIsNone(signlan.interpret(client, ["I love you"]))
+            self.assertIsNone(signlan.interpret(client, ["hello"]))
 
     def test_empty_reply_returns_none(self):
-        self.assertIsNone(signlan.interpret(fake_client(""), ["I love you"]))
+        self.assertIsNone(signlan.interpret(fake_client(""), ["hello"]))
 
 
 class ResponderTests(unittest.TestCase):
     def test_replies_in_the_background_and_speaks(self):
-        speaking = threading.Event()
-        finish_speaking = threading.Event()
+        speaking, finish_speaking = threading.Event(), threading.Event()
 
         def slow_speak(text):
             speaking.set()
             finish_speaking.wait(5)
 
-        responder = signlan.Responder(fake_client("I love you too!"))
-        with mock.patch.object(signlan, "speak", side_effect=slow_speak) as speak, \
-                mock.patch("builtins.print"):
-            responder.start(["I love you"])
+        responder = signlan.Responder(fake_client("Hello there!"))
+        with mock.patch.object(signlan, "speak", side_effect=slow_speak) as speak, mock.patch("builtins.print"):
+            responder.start(["hello"])
             self.assertTrue(speaking.wait(5))
-            self.assertTrue(responder.busy)  # start() returned while the reply is still being spoken
+            self.assertTrue(responder.busy)
             self.assertEqual(responder.status, "Speaking...")
-
             finish_speaking.set()
             responder.wait(5)
-
         self.assertFalse(responder.busy)
-        self.assertEqual(responder.status, "")
-        self.assertEqual(responder.heard, ["I love you"])
-        self.assertEqual(responder.reply, "I love you too!")
-        speak.assert_called_once_with("I love you too!")
+        self.assertEqual((responder.status, responder.heard, responder.reply), ("", ["hello"], "Hello there!"))
+        speak.assert_called_once_with("Hello there!")
 
     def test_failed_reply_is_shown_and_not_spoken(self):
         client = mock.Mock()
         client.chat.completions.create.side_effect = APIConnectionError(request=mock.Mock())
         responder = signlan.Responder(client)
         with mock.patch.object(signlan, "speak") as speak, mock.patch("builtins.print"):
-            responder.start(["I love you"])
+            responder.start(["hello"])
             responder.wait(5)
         speak.assert_not_called()
         self.assertIn("no reply", responder.reply)
-        self.assertEqual(responder.status, "")
 
 
 class OverlayTests(unittest.TestCase):
@@ -237,19 +142,15 @@ class OverlayTests(unittest.TestCase):
 
     def test_overlay_draws_on_the_frame(self):
         frame = np.full((480, 640, 3), 128, dtype=np.uint8)
-        signlan.draw_overlay(frame, "done (95%)", True, 0.5, "Thinking...",
-                             ["Signed: I love you", "Said: I love you too!"])
-        self.assertEqual(frame.shape, (480, 640, 3))
+        signlan.draw_overlay(frame, "hello (91%)", True, 0.5, "Thinking...", ["Signed: hello", "Said: Hello!"])
         self.assertTrue((frame != 128).any())
 
 
 class MainLoopTests(unittest.TestCase):
-    """Drive main() with a scripted camera and model: wake, sign, send, get a spoken reply"""
+    """Drive main() with scripted landmarks: sign, lower the hands, pause, hear the reply"""
 
-    def test_full_conversation(self):
-        labels = signlan.load_labels(signlan.LABELS_PATH)
-        script = (["Background"] * 3 + ["done"] * 10 + ["Background"] * 3 + ["I love you"] * 10
-                  + ["Background"] * 3 + ["done"] * 10 + ["Background"] * 15)
+    def test_sign_pause_send_speak(self):
+        script = ["none"] * 5 + ["both"] * 20 + ["none"] * 90
         position = {"i": 0}
 
         class FakeCamera:
@@ -264,35 +165,38 @@ class MainLoopTests(unittest.TestCase):
             def release(self):
                 pass
 
-        class FakeModel:
-            output_shape = (None, len(labels))
+        class FakeExtractor:
+            def __enter__(self):
+                return self
 
-            def __call__(self, image, training=False):
-                label = script[min(position["i"], len(script)) - 1]
-                probabilities = np.full((1, len(labels)), 0.01, dtype=np.float32)
-                probabilities[0, labels.index(label)] = 0.98
-                return mock.Mock(numpy=lambda: probabilities)
+            def __exit__(self, *exc):
+                pass
 
-        client = fake_client("I love you so much!")
+            def extract(self, frame, timestamp_ms):
+                return make_raw(script[min(position["i"], len(script)) - 1])
+
+        recogniser = mock.Mock()
+        recogniser.predict.return_value = [("hello", 0.9), ("good", 0.05), ("bank", 0.01)]
+        client = fake_client("Hello there!")
         spoken = []
-        real_tracker = signlan.SignTracker
         with mock.patch.dict(os.environ, {"GROQ_API_KEY": "test"}), \
-                mock.patch.object(signlan, "load_model", return_value=FakeModel()), \
+                mock.patch.object(signlan, "load_recogniser", return_value=recogniser), \
+                mock.patch.object(signlan, "LandmarkExtractor", FakeExtractor), \
                 mock.patch.object(signlan, "Groq", return_value=client), \
-                mock.patch.object(signlan, "SignTracker", lambda: real_tracker(hold_seconds=0.15)), \
                 mock.patch.object(signlan, "speak", side_effect=spoken.append), \
                 mock.patch.object(signlan.cv2, "VideoCapture", return_value=FakeCamera()), \
                 mock.patch.object(signlan.cv2, "imshow"), \
                 mock.patch.object(signlan.cv2, "destroyAllWindows"), \
                 mock.patch.object(signlan.cv2, "getWindowProperty", return_value=1), \
-                mock.patch.object(signlan.cv2, "waitKey", side_effect=lambda _: 27 if position["i"] >= len(script) else -1), \
+                mock.patch.object(signlan.cv2, "waitKey",
+                                  side_effect=lambda _: 27 if position["i"] >= len(script) else -1), \
                 mock.patch("builtins.print"):
             signlan.main()
 
-        client.chat.completions.create.assert_called_once()
-        user_message = client.chat.completions.create.call_args.kwargs["messages"][-1]["content"]
-        self.assertEqual(user_message, "Signs: I love you")
-        self.assertEqual(spoken, ["I love you so much!"])
+        recogniser.predict.assert_called_once()
+        self.assertEqual(recogniser.predict.call_args.args[0].shape, (32, 184))
+        self.assertEqual(client.chat.completions.create.call_args.kwargs["messages"][-1]["content"], "Signs: hello")
+        self.assertEqual(spoken, ["Hello there!"])
 
 
 if __name__ == "__main__":

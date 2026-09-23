@@ -8,14 +8,13 @@ import numpy as np
 import pyttsx3
 from dotenv import load_dotenv
 from groq import APIError, Groq
-# Teachable Machine exports Keras 2 models. Keras 3 (bundled with TensorFlow >= 2.16)
-# fails to load them ("Error when deserializing class 'DepthwiseConv2D' ... groups"),
-# so load the model with tf-keras, the Keras 2 compatibility package.
-from tf_keras.models import load_model
+
+from isl.features import frame_features
+from isl.landmarks import LandmarkExtractor
+from isl.model import load_recogniser
+from isl.segmenter import Segmenter
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "keras_model.h5"
-LABELS_PATH = BASE_DIR / "labels.txt"
 
 # Read GROQ_API_KEY (and optionally GROQ_MODEL) from a .env file next to this script
 load_dotenv(BASE_DIR / ".env")
@@ -28,115 +27,57 @@ SYSTEM_PROMPT = ("You are a sign language interpreter for a deaf or hard-of-hear
                  "Turn them into one short, natural sentence in the first person that says what they mean, "
                  "to be spoken aloud to a hearing person. Reply with only that sentence, in at most 12 words.")
 
-# Show the wake word sign to start a sentence, make your signs, then show it again to send.
-# Label text from labels.txt, without the number
-WAKE_WORD = "done"
-BACKGROUND = "Background"  # "no sign" class, never sent to the chatbot
-
-CONFIDENCE_THRESHOLD = 80  # Only accept predictions above this confidence (%)
-HOLD_SECONDS = 1.0  # A sign must be confidently held this long to count
-RELEASE_SECONDS = 0.5  # ...and be gone this long before the same sign can count again
-
-# Teachable Machine mirrors webcam samples by default (its "Flip" setting), so mirror the camera
-# the same way. Set to False if your model was trained with Flip off or from uploaded photos
-MIRROR = True
+WORD_THRESHOLD = 0.5  # Only accept a recognised word the model gives at least this probability
+SEND_AFTER_SECONDS = 2.0  # Stop signing this long to send the sentence
+WORD_DISPLAY_SECONDS = 3.0  # How long the last recognised word stays on screen
+BACKSPACE, ESC = 8, 27
 
 WINDOW_NAME = "Sign Language Recognition"
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 GREEN, YELLOW, WHITE, GREY = (0, 200, 0), (0, 220, 255), (255, 255, 255), (170, 170, 170)
 
-
-def load_labels(path):
-    """Read Teachable Machine labels ("0 I love you") without the index prefix"""
-    with open(path, encoding="utf-8") as f:
-        return [line.strip().split(" ", 1)[-1] for line in f if line.strip()]
-
-
-def preprocess(frame):
-    """Turn a webcam frame into model input the way Teachable Machine trains:
-    centre square crop, RGB colour order, 224x224, scaled to [-1, 1]"""
-    height, width = frame.shape[:2]
-    side = min(height, width)
-    top, left = (height - side) // 2, (width - side) // 2
-    square = frame[top:top + side, left:left + side]
-
-    image = cv2.cvtColor(square, cv2.COLOR_BGR2RGB)  # OpenCV captures BGR, the model was trained on RGB
-    image = cv2.resize(image, (224, 224), interpolation=cv2.INTER_AREA)
-    image_array = np.asarray(image, dtype=np.float32).reshape(1, 224, 224, 3)
-    return (image_array / 127.5) - 1  # Normalize to [-1,1]
-
-
-class SignTracker:
-    """Turns noisy per-frame predictions into a single event per deliberately held sign"""
-
-    def __init__(self, hold_seconds=HOLD_SECONDS, threshold=CONFIDENCE_THRESHOLD, release_seconds=RELEASE_SECONDS):
-        self.hold_seconds = hold_seconds
-        self.threshold = threshold
-        self.release_seconds = release_seconds
-        self.last_fired = None  # Blocked from firing again until it has been released
-        self.gone_since = None
-        self.reset()
-
-    def reset(self):
-        """Drop the current hold (the last accepted sign stays blocked until released)"""
-        self.label = None
-        self.since = None
-
-    def update(self, label, confidence, now=None):
-        """Return the label once it has been confidently held for hold_seconds, else None.
-        A sign fires once and must then be gone for release_seconds before it can fire again,
-        so holding it longer, or a brief dip in confidence, doesn't repeat it"""
-        now = time.monotonic() if now is None else now
-
-        if self.last_fired is not None:
-            if label == self.last_fired:  # Still showing it, even if less confidently
-                self.gone_since = None
-            elif self.gone_since is None:
-                self.gone_since = now
-            elif now - self.gone_since >= self.release_seconds:
-                self.last_fired = None
-
-        if confidence <= self.threshold:
-            self.reset()
-            return None
-        if label != self.label:
-            self.label, self.since = label, now
-        if label == self.last_fired or now - self.since < self.hold_seconds:
-            return None
-        self.last_fired, self.gone_since = label, None
-        return label
-
-    def progress(self, now=None):
-        """How far (0 to 1) the current sign is towards being accepted"""
-        if self.label is None:
-            return 0.0
-        if self.label == self.last_fired:
-            return 1.0
-        now = time.monotonic() if now is None else now
-        return min((now - self.since) / self.hold_seconds, 1.0)
+# MediaPipe hand joints and pose arm points to draw on the preview
+HAND_CONNECTIONS = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10), (10, 11),
+                    (11, 12), (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17)]
+ARM_CONNECTIONS = [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16)]
 
 
 class SentenceBuilder:
-    """Collects accepted signs into a sentence: the wake word starts it, the wake word again finishes it"""
+    """Collects recognised words; pausing after signing finishes the sentence"""
 
-    def __init__(self):
-        self.collecting = False
-        self.signs = []
+    def __init__(self, send_after=SEND_AFTER_SECONDS):
+        self.send_after = send_after
+        self.words = []
+        self._idle_since = None
 
-    def add(self, sign):
-        """Feed an accepted sign. Returns the list of signs when the sentence is finished,
-        an empty list if it was cancelled (wake word twice with nothing in between), otherwise None"""
-        if sign == BACKGROUND:
+    def add(self, word, now):
+        self.words.append(word)
+        self._idle_since = now
+
+    def remove_last(self, now):
+        if self.words:
+            self.words.pop()
+        self._idle_since = now if self.words else None
+
+    def progress(self, now):
+        """How far (0 to 1) the pause has got towards sending"""
+        if not self.words or self._idle_since is None:
+            return 0.0
+        return min((now - self._idle_since) / self.send_after, 1.0)
+
+    def update(self, signing, now):
+        """Call every frame; returns the finished words once the signer has paused long enough, else None"""
+        if signing:
+            self._idle_since = None
             return None
-        if not self.collecting:
-            if sign == WAKE_WORD:
-                self.collecting, self.signs = True, []
+        if not self.words:
             return None
-        if sign != WAKE_WORD:
-            self.signs.append(sign)
+        if self._idle_since is None:
+            self._idle_since = now
+        if now - self._idle_since < self.send_after:
             return None
-        sentence, self.signs, self.collecting = self.signs, [], False
-        return sentence
+        words, self.words, self._idle_since = self.words, [], None
+        return words
 
 
 def interpret(client, signs):
@@ -226,14 +167,14 @@ def shade(frame, top, bottom):
 
 
 def draw_overlay(frame, prediction_text, confident, progress, status, captions):
-    """Draw the current prediction, hold-progress ring, status line and captions onto the frame"""
+    """Draw the last word, a progress ring, the status line and captions onto the frame"""
     height, width = frame.shape[:2]
 
     shade(frame, 0, 75)
     cv2.putText(frame, prediction_text, (10, 30), FONT, 0.8, GREEN if confident else GREY, 2)
     cv2.putText(frame, status, (10, 62), FONT, 0.7, YELLOW, 2)
 
-    # Ring that fills up while a sign is held, turning green once it's accepted
+    # Ring that fills up while waiting to send
     if progress > 0:
         centre, radius = (width - 40, 38), 24
         cv2.circle(frame, centre, radius, GREY, 2)
@@ -248,83 +189,108 @@ def draw_overlay(frame, prediction_text, confident, progress, status, captions):
             cv2.putText(frame, line, (10, top + 30 * (i + 1)), FONT, 0.7, WHITE, 2)
 
 
+def draw_skeleton(display, raw):
+    """Draw the tracked arms and hands onto the mirrored preview"""
+    height, width = display.shape[:2]
+    sx, sy = width / raw.width, height / raw.height
+
+    def point(x, y):
+        return int(width - x * sx), int(y * sy)
+
+    if raw.pose is not None:
+        for a, b in ARM_CONNECTIONS:
+            if min(raw.pose[a, 2], raw.pose[b, 2]) >= 0.5:
+                cv2.line(display, point(*raw.pose[a, :2]), point(*raw.pose[b, :2]), GREY, 2)
+    for hand in raw.hands:
+        for a, b in HAND_CONNECTIONS:
+            cv2.line(display, point(*hand[a]), point(*hand[b]), GREEN, 2)
+        for x, y in hand:
+            cv2.circle(display, point(x, y), 3, YELLOW, -1)
+
+
+def status_text(busy_status, body_found, signing, has_words):
+    if busy_status:
+        return busy_status
+    if not body_found:
+        return "Move back so your shoulders are visible"
+    if signing:
+        return "Signing..."
+    if has_words:
+        return "Pause to send, or sign the next word"
+    return "Sign a word"
+
+
 def main():
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         raise SystemExit("GROQ_API_KEY is not set. Copy .env.example to .env and paste in your key "
                          "from https://console.groq.com/keys")
 
-    # Load the trained sign language model and its class labels
-    model = load_model(MODEL_PATH, compile=False)
-    class_names = load_labels(LABELS_PATH)
-    if len(class_names) != model.output_shape[-1]:
-        raise SystemExit(f"labels.txt has {len(class_names)} labels but the model predicts "
-                         f"{model.output_shape[-1]} classes")
-
-    # Open webcam
+    recogniser = load_recogniser()
     camera = cv2.VideoCapture(0)
     if not camera.isOpened():
         raise SystemExit("Could not open the webcam")
 
-    tracker = SignTracker()
+    segmenter = Segmenter()
     builder = SentenceBuilder()
     responder = Responder(Groq(api_key=api_key))
-    print(f'Show "{WAKE_WORD}" to start, sign your words, then show "{WAKE_WORD}" again to send. '
-          f"Press Esc to quit.")
+    last_word, last_word_ok, last_word_time = "", False, -WORD_DISPLAY_SECONDS
+    print("Sign a word, then lower your hands. Pause for 2 seconds to send the sentence. "
+          "Backspace removes the last word, Esc quits.")
 
-    while True:
-        # Capture webcam image
-        ret, frame = camera.read()
-        if not ret:
-            break
-        if MIRROR:
-            frame = cv2.flip(frame, 1)
+    with LandmarkExtractor() as extractor:
+        start = time.monotonic()
+        while True:
+            ret, frame = camera.read()
+            if not ret:
+                break
+            now = time.monotonic()
+            # The model sees the camera image un-mirrored, like the INCLUDE videos
+            raw = extractor.extract(frame, (now - start) * 1000)
+            features, body_found = frame_features(raw)
 
-        # Predict the sign language gesture
-        prediction = model(preprocess(frame), training=False).numpy()
-        index = int(np.argmax(prediction))
-        class_name = class_names[index]  # Get predicted label
-        confidence_score = prediction[0][index] * 100  # Convert to percentage
-
-        if responder.busy:
-            tracker.reset()  # Ignore signs while the bot is thinking or speaking
-        else:
-            sign = tracker.update(class_name, confidence_score)
-            if sign is not None:
-                print(f"Recognized Sign: {sign} (Confidence: {confidence_score:.2f}%)")
-                was_collecting = builder.collecting
-                sentence = builder.add(sign)
+            if responder.busy:
+                segmenter.reset()  # Ignore signing while the bot is thinking or speaking
+            else:
+                sequence = segmenter.update(features, now)
+                if sequence is not None:
+                    guesses = recogniser.predict(sequence)
+                    word, probability = guesses[0]
+                    last_word_ok, last_word_time = probability >= WORD_THRESHOLD, now
+                    if last_word_ok:
+                        builder.add(word, now)
+                        last_word = f"{word} ({probability:.0%})"
+                    else:
+                        last_word = "? maybe: " + " / ".join(guess for guess, _ in guesses)
+                    print(f"Recognized Sign: {last_word}")
+                sentence = builder.update(segmenter.signing, now)
                 if sentence:
                     print(f"Sending: {' / '.join(sentence)}")
                     responder.start(sentence)
-                elif sentence == []:
-                    print("Nothing signed, cancelled.")
-                elif builder.collecting and not was_collecting:
-                    print(f'Listening... sign your words, then "{WAKE_WORD}" to send.')
 
-        # Show the live webcam feed with what the bot sees, hears and says
-        if responder.busy:
-            status = responder.status
-        elif builder.collecting:
-            status = f'Sign your words, then "{WAKE_WORD}" to send'
-        else:
-            status = f'Show "{WAKE_WORD}" to start'
+            # Show a mirrored preview with what was tracked, heard and said
+            display = cv2.flip(frame, 1)
+            draw_skeleton(display, raw)
+            captions = []
+            if builder.words:
+                captions.append("Signed: " + " / ".join(builder.words))
+            elif responder.heard:
+                captions.append("Signed: " + " / ".join(responder.heard))
+                if responder.reply:
+                    captions.append("Said: " + responder.reply)
+            status = status_text(responder.status if responder.busy else "", body_found, segmenter.signing,
+                                 bool(builder.words))
+            recent = now - last_word_time < WORD_DISPLAY_SECONDS
+            draw_overlay(display, last_word if recent else "", last_word_ok, builder.progress(now), status,
+                         captions)
+            cv2.imshow(WINDOW_NAME, display)
 
-        signed = builder.signs if builder.collecting else responder.heard
-        captions = []
-        if signed or builder.collecting:
-            captions.append("Signed: " + (" / ".join(signed) or "..."))
-        if responder.reply and not builder.collecting:
-            captions.append("Said: " + responder.reply)
-
-        show_ring = class_name != BACKGROUND and not responder.busy
-        draw_overlay(frame, f"{class_name} ({confidence_score:.0f}%)", confidence_score > CONFIDENCE_THRESHOLD,
-                     tracker.progress() if show_ring else 0.0, status, captions)
-        cv2.imshow(WINDOW_NAME, frame)
-
-        # Press "Esc" (ASCII 27) or close the window to exit
-        if cv2.waitKey(1) == 27 or cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-            break
+            # Press "Esc" or close the window to exit; Backspace removes the last word
+            key = cv2.waitKey(1)
+            if key == ESC or cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                break
+            if key == BACKSPACE:
+                builder.remove_last(now)
 
     # Release camera and close windows
     camera.release()
