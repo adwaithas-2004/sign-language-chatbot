@@ -11,8 +11,9 @@ NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_WRIST, RIGHT_
 POSE_POINTS = (NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_WRIST, RIGHT_WRIST)
 _POSE_MIRROR = [0, 2, 1, 4, 3, 6, 5]  # POSE_POINTS order with left and right swapped
 MIN_VISIBILITY = 0.5
-# A wrist less than this many shoulder-widths below the shoulders counts as a raised hand
-HANDS_UP_K = 1.5
+# A wrist less than this many shoulder-widths below the shoulders counts as a raised hand.
+# Calibrated on the INCLUDE-50 train split: resting wrists sit at 1.53-1.81, so 1.25 counts 0.4 % of them as up
+HANDS_UP_K = 1.25
 
 # Layout of one frame's feature vector
 POSE_SLICE = slice(0, 14)  # 7 pose points (x, y) in the body frame
