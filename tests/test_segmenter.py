@@ -11,6 +11,7 @@ FRAMES = {
     False: frame(False),  # no hand in view (lowered out of frame, or MediaPipe lost it)
     "lowered": frame_features(make_raw("both", wrist_y=400))[0],  # hands visible, below the threshold
     "lost": np.zeros(NUM_FEATURES, np.float32),  # shoulders out of view
+    "low": frame_features(make_raw("both", wrist_y=340))[0],  # wrist 1.4 shoulder-widths below, like "shop"
 }
 
 
@@ -41,6 +42,10 @@ class SegmenterTests(unittest.TestCase):
         # MediaPipe loses fast-moving hands for a frame or two (every INCLUDE "priest" video never started a sign)
         timeline = [(True, 2 / 30), (False, 1 / 30)] * 10 + [("lowered", 0.5)]
         self.assertEqual(len(self.run_timeline(timeline)), 1)
+
+    def test_signs_made_low_still_start_a_segment(self):
+        # Some INCLUDE words ("shop") are signed around waist height, below the trimming threshold
+        self.assertEqual(len(self.run_timeline([("lowered", 0.3), ("low", 0.6), ("lowered", 0.8)])), 1)
 
     def test_blips_are_ignored(self):
         self.assertEqual(self.run_timeline([(True, 0.05), (False, 0.5), (True, 0.2), (False, 1.0)]), [])

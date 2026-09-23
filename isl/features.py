@@ -11,10 +11,10 @@ NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_WRIST, RIGHT_
 POSE_POINTS = (NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_WRIST, RIGHT_WRIST)
 _POSE_MIRROR = [0, 2, 1, 4, 3, 6, 5]  # POSE_POINTS order with left and right swapped
 MIN_VISIBILITY = 0.5
-# A wrist less than this many shoulder-widths below the shoulders counts as a raised hand.
-# Chosen by replaying the INCLUDE-50 videos through the live segmenter (scripts/evaluate_live.py): 1.5 lets low
-# signs such as "shop" start a segment; 1.25 kept resting hands (1.53-1.81) further away but missed more signs
-HANDS_UP_K = 1.5
+# A wrist less than this many shoulder-widths below the shoulders counts as a raised hand when trimming a sign
+# to the part the model sees. Calibrated on the INCLUDE-50 train split: resting wrists sit at 1.53-1.81, so 1.25
+# counts 0.4 % of them as up. The live segmenter uses its own, looser threshold to decide when signs start and end
+HANDS_UP_K = 1.25
 
 # Layout of one frame's feature vector
 POSE_SLICE = slice(0, 14)  # 7 pose points (x, y) in the body frame
@@ -70,14 +70,16 @@ def frame_features(raw):
     return features, True
 
 
-def hands_up(features):
-    """Whether a hand is raised: one bool for a frame (F,), a bool array for a sequence (T, F)"""
+def hands_up(features, k=None):
+    """Whether a hand is raised (wrist less than k shoulder-widths below the shoulders, HANDS_UP_K by default):
+    one bool for a frame (F,), a bool array for a sequence (T, F)"""
+    k = HANDS_UP_K if k is None else k
     frames = np.atleast_2d(features)
     up = np.zeros(len(frames), dtype=bool)
     for i, block in enumerate(HAND_SLICES):
         present = frames[:, PRESENCE_SLICE.start + i] > 0.5
         wrist_y = frames[:, block.start + 1]  # body frame: y grows downwards from the shoulders
-        up |= present & (wrist_y < HANDS_UP_K)
+        up |= present & (wrist_y < k)
     return up if np.ndim(features) == 2 else bool(up[0])
 
 

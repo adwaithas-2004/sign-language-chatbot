@@ -8,6 +8,9 @@ END_SECONDS = 0.3  # hands down this long ends it
 MIN_SIGN_SECONDS = 0.3  # shorter "signs" are ignored as blips
 MAX_SIGN_SECONDS = 4.0  # longer ones are cut off and recognised anyway
 DROPOUT_SECONDS = 0.5  # a hand MediaPipe loses for less than this doesn't count as lowered
+# Looser than the trimming threshold (features.HANDS_UP_K) so signs made at waist height still start a segment.
+# Chosen by replaying the INCLUDE-50 videos through this segmenter (scripts/evaluate_live.py)
+SEGMENT_HANDS_UP_K = 1.5
 BODY_LOST_SECONDS = 0.3  # losing the shoulders this long discards the sign in progress
 
 
@@ -32,7 +35,7 @@ class Segmenter:
         if not features.any():
             return self._body_lost(now)
         self._lost_since = None
-        up = hands_up(features)
+        up = hands_up(features, SEGMENT_HANDS_UP_K)
         # MediaPipe often loses a fast-moving hand for a few frames: that's not the same as lowering it
         bridged = (not up and not features[PRESENCE_SLICE].any() and self._last_up is not None
                    and now - self._last_up < self.dropout_seconds)

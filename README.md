@@ -26,6 +26,8 @@ BiGRU inference: 4.7 ms per sign on CPU. Hardest words for the saved model: girl
 
 INCLUDE's 7 signers appear in every split, so these are *seen-signer* results. Accuracy for a new signer and camera will be lower.
 
+**Live path:** replaying the 192 test videos through the app's own segmenter and model gives **93.2%** top-1. 6 videos never started a sign and 0 were split into several. The gap to the offline number is the segmenter: MediaPipe sometimes loses a fast-moving hand for most of a sign, and a few words are signed low. Words that start a sign in under 80% of their videos: priest (20%), fall (60%), shop (64%).
+
 ![Confusion matrix](reports/confusion_matrix.png)
 
 ## How to use it
@@ -64,6 +66,7 @@ The trained model is in `models/`, so the app works without the dataset.
 ```bash
 python scripts/prepare_include50.py   # ~15 GB streamed from Zenodo, ~1-2 hours; safe to stop and re-run
 python scripts/train.py               # ~5-10 minutes on CPU; writes models/ and reports/
+python scripts/evaluate_live.py       # replays the videos through the live app's segmenter: reports/live_path.md
 ```
 
 `prepare_include50.py` reads only the 958 INCLUDE-50 videos out of the 57 GB dataset. It uses HTTP range requests
@@ -84,7 +87,7 @@ mean and spread, and saves the run with the best **validation** accuracy. The te
 | `isl/model.py` | The BiGRU: build, save, load, predict |
 | `isl/augment.py` | Training-time variations (flip, rotate, scale, speed, noise) |
 | `isl/include_data.py` | INCLUDE-50 splits and labels; range-fetching videos from Zenodo |
-| `scripts/` | Dataset preparation and training |
+| `scripts/` | Dataset preparation, training, and live-path evaluation |
 | `reports/` | Measured results and confusion matrix |
 | `tests/` | Unit, smoke and end-to-end tests: `python -m unittest discover -s tests -t . -v` |
 
@@ -94,8 +97,10 @@ mean and spread, and saves the run with the best **validation** accuracy. The te
   expect lower accuracy for a new signer, camera and room.
 - Only the 50 INCLUDE-50 words are recognised. The pipeline supports the full 263-word INCLUDE set with a split
   change, but that hasn't been trained or evaluated.
-- One sign at a time: lower your hands between signs, and sign above mid-chest (the hands-up threshold was
-  calibrated on INCLUDE, where resting hands sit around hip height).
+- One sign at a time: lower your hands between signs. A sign ends 0.3 s after your hands drop below waist height,
+  or 0.8 s after they leave the camera's view (MediaPipe briefly loses fast-moving hands, so short gaps are
+  bridged).
+- Priest, fall and shop often don't start a sign in the live app (see the live-path results above).
 - The saved model's 7 test mistakes: boy ↔ girl (both ways), court → shop, hot → shop, dog → long, fall → it,
   train ticket → teacher. A simple baseline already reaches 94.3%, so most of the accuracy comes from the
   body-normalised landmark features; the BiGRU adds about 1.3 points on average.

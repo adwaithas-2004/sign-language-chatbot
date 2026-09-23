@@ -50,6 +50,11 @@ class HandsUpTests(unittest.TestCase):
         self.assertFalse(F.hands_up(F.frame_features(make_raw("both", wrist_y=400))[0]))
         self.assertFalse(F.hands_up(F.frame_features(make_raw("none"))[0]))
 
+    def test_a_looser_threshold_can_be_given(self):
+        low = F.frame_features(make_raw("both", wrist_y=340))[0]  # wrist 1.4 shoulder-widths below the shoulders
+        self.assertFalse(F.hands_up(low))
+        self.assertTrue(F.hands_up(low, k=1.5))
+
     def test_sequence_gives_one_flag_per_frame(self):
         clip = np.stack([frame(True), frame(False), frame(True)])
         np.testing.assert_array_equal(F.hands_up(clip), [True, False, True])

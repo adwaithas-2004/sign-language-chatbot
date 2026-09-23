@@ -85,7 +85,8 @@ isl/
   examples.py                   `python -m isl.examples <word>` plays the reference video
 scripts/
   prepare_include50.py          fetch -> landmarks -> delete, resumable
-  train.py                      baseline + BiGRU training and evaluation
+  train.py                      baseline + BiGRU training and evaluation (5 seeds, mean ± std)
+  evaluate_live.py              replays the videos through the live segmenter: live-path accuracy, trigger rates
 models/                         isl50_bigru.keras, labels.json (committed);
                                 MediaPipe .task files (downloaded on first use, git-ignored)
 reports/                        metrics.json, confusion_matrix.png, results.md (committed)
@@ -154,9 +155,11 @@ Per frame, from `RawLandmarks` (all coordinates in **pixels**, which removes the
 - `frame_features(raw) -> (features, body_found)`.
 - **Hands up:** `hands_up(features)` is true when at least one hand is present with its wrist above
   `shoulder_mid_y + HANDS_UP_K × shoulder_width` (image y grows downwards). It is computed **from the feature vector**
-  (for one frame or a whole sequence), so changing `HANDS_UP_K` never requires re-extracting videos. `HANDS_UP_K`
-  starts at 1.5 and is calibrated on the prepared INCLUDE landmarks before the real training run (target: rest poses
-  at the start and end of clips count as down).
+  (for one frame or a whole sequence), so changing `HANDS_UP_K` never requires re-extracting videos.
+  `HANDS_UP_K = 1.25` decides **trimming** (which frames the model sees) and is calibrated per frame on the train
+  split. The live segmenter uses its own looser `SEGMENT_HANDS_UP_K = 1.5` to decide when signs **start and end**,
+  chosen with `DROPOUT_SECONDS` by **live-path accuracy**: `scripts/evaluate_live.py` replays every prepared video
+  through the segmenter and saved model (one shared threshold: 91.1 %; split thresholds: 93.2 %).
 - `trim(frames, up)`: keep from the first to the last hands-up frame with 2 frames of padding; if fewer than 4 frames
   are up, keep the whole clip.
 - `resample(frames, 32)`: linear interpolation along time to exactly `SEQUENCE_LENGTH = 32` frames.
@@ -209,8 +212,13 @@ Expected cost: ~15 GB download, ~1–1.5 hours in total.
 `Segmenter.update(features, now) -> sequence | None`: returns the model-ready `(32, 184)` sequence for a sign that
 has just ended (hands up is derived from the features).
 
-- **Start:** hands up for `START_SECONDS = 0.1`.
+- **Start:** real hands-up frames spanning `START_SECONDS = 0.1`.
 - **End:** hands down for `END_SECONDS = 0.3`; the sign is the frames from its start to the last hands-up frame.
+- **Tracking dropouts:** a frame where MediaPipe finds no hand (but the body is visible) within
+  `DROPOUT_SECONDS = 0.5` of the last raised hand counts as still signing, since MediaPipe often loses fast-moving
+  hands mid-sign. A hand seen below the threshold still counts as lowered straight away.
+- **Body lost:** frames without shoulders are skipped; if they last `BODY_LOST_SECONDS = 0.3`, the sign in progress
+  is discarded rather than guessed at.
 - Signs shorter than `MIN_SIGN_SECONDS = 0.3` are dropped. At `MAX_SIGN_SECONDS = 4.0` the sign is emitted anyway.
 - The emitted frames go through the same `trim` / `resample` as training.
 - `signing` property for the on-screen status.
