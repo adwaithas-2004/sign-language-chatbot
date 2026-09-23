@@ -150,7 +150,7 @@ class MainLoopTests(unittest.TestCase):
     """Drive main() with scripted landmarks: sign, lower the hands, pause, hear the reply"""
 
     def test_sign_pause_send_speak(self):
-        script = ["none"] * 5 + ["both"] * 20 + ["none"] * 90
+        script = ["none"] * 5 + ["both"] * 20 + ["none"] * 130  # sign ends ~0.8 s after the hands go, then 2 s pause
         position = {"i": 0}
 
         class FakeCamera:
