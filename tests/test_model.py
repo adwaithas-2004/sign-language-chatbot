@@ -1,11 +1,12 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from isl.model import build_model, load_recogniser, save_labels
+from isl.model import Recogniser, build_model, load_recogniser, save_labels
 
 
 class ModelTests(unittest.TestCase):
@@ -26,6 +27,19 @@ class ModelTests(unittest.TestCase):
         probabilities = [p for _, p in guesses]
         self.assertEqual(probabilities, sorted(probabilities, reverse=True))
         self.assertTrue({word for word, _ in guesses} <= {"A", "B", "C", "D"})
+
+    def test_prediction_is_fast_enough_for_the_live_app(self):
+        # Calling the model eagerly ran the GRUs step by step: ~300 ms per sign, freezing the video
+        model = build_model(50)
+        recogniser = Recogniser(model, [str(i) for i in range(50)], [str(i) for i in range(50)])
+        sequence = np.random.default_rng(0).normal(size=(32, 184)).astype(np.float32)
+        recogniser.predict(sequence)  # warm-up
+        start = time.perf_counter()
+        for _ in range(10):
+            guesses = recogniser.predict(sequence)
+        self.assertLess((time.perf_counter() - start) / 10, 0.05)
+        expected = np.asarray(model(sequence[None], training=False))[0]
+        self.assertAlmostEqual(guesses[0][1], float(expected.max()), places=5)
 
     def test_missing_model_explains_how_to_get_one(self):
         with self.assertRaises(SystemExit) as caught:

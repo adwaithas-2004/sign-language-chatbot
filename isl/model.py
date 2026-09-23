@@ -43,7 +43,8 @@ class Recogniser:
 
     def predict(self, sequence, top_k=3):
         """[(word, probability)] for one (32, F) sign, most likely first"""
-        probabilities = np.asarray(self.model(np.asarray(sequence, np.float32)[None], training=False))[0]
+        # predict_on_batch runs a compiled graph: ~3 ms, where calling the model eagerly took ~200+ ms
+        probabilities = np.asarray(self.model.predict_on_batch(np.asarray(sequence, np.float32)[None]))[0]
         best = np.argsort(probabilities)[::-1][:top_k]
         return [(self.display[i], float(probabilities[i])) for i in best]
 
