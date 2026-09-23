@@ -32,11 +32,14 @@ The project is a **portfolio / GitHub showcase**: the value is a reproducible en
 
 ## Dataset facts (verified)
 
-- INCLUDE on Zenodo, record 4010759, licence **CC-BY-4.0**. 15 categories in 43 zips of 0.8–1.8 GB (56.8 GB total).
-  Zenodo serves HTTP range requests (verified: `206 Partial Content`).
-- Official split lists and label maps: GitHub `AI4Bharat/INCLUDE`, `train_test_paths/include50_{train,val,test}.txt`
-  and `label_maps/label_map_include50.json`.
-- INCLUDE-50: **958 videos** (all `.MOV`), 14–25 per word, spread over **all 15 categories**.
+- INCLUDE on Zenodo, record 4010759, licence **CC-BY-4.0**. 15 categories in **44 zips** of 0.8–1.8 GB (56.8 GB
+  total). Zenodo serves HTTP range requests (verified: `206 Partial Content`). Zip members are named exactly like the
+  split paths, are deflate-compressed, and average 15.7 MB per video.
+- Official split lists and label maps: GitHub `AI4Bharat/INCLUDE` (MIT licence, branch `master`),
+  `train_test_paths/include50_{train,val,test}.txt` and `label_maps/label_map_include50.json`. These four small files
+  are **committed** into `isl/include50/` with a `SOURCE.md` credit, so nothing needs fetching to read the splits.
+- INCLUDE-50: **958 videos** (all `.MOV`), 14–25 per word, spread over **all 15 categories**. Splits: train 689,
+  val 77, test 192, with no overlap. The **test split covers 49 of the 50 words**.
 - Paths look like `Greetings/48. Hello/MVI_0089.MOV`; 15 have an extra level:
   `Places/19. House/Extra/MVI_3439.MOV`. The **second path part is always the word folder**.
 - Label key = word folder without the `NN. ` prefix, lowercased, non-alphanumerics removed
@@ -71,8 +74,10 @@ reports/ (metrics, confusion matrix, results.md)     SentenceBuilder (pause to s
 signlan.py                      live app (entry point)
 isl/
   __init__.py
+  include50/                    official split lists + label map (from AI4Bharat/INCLUDE, MIT) + SOURCE.md
   landmarks.py                  MediaPipe Tasks wrapper: frame -> raw hand + pose points
-  features.py                   normalisation, hands-up test, trimming, resampling, flip
+  features.py                   RawLandmarks, normalisation, hands-up test, trimming, resampling, flip
+  augment.py                    training-time random variations
   segmenter.py                  live frame stream -> complete signs
   model.py                      build / save / load / predict top-k
   include_data.py               split + label parsing, remote zip index, single-video fetch
@@ -84,6 +89,7 @@ models/                         isl50_bigru.keras, labels.json (committed);
                                 MediaPipe .task files (downloaded on first use, git-ignored)
 reports/                        metrics.json, confusion_matrix.png, results.md (committed)
 data/                           git-ignored: include_index.json, landmarks/, examples/, tmp/, failed.txt
+tests/fakes.py                  synthetic landmarks shared by the tests
 tests/                          unit, smoke and scripted main-loop tests
 docs/superpowers/specs/         this document
 ```
@@ -95,14 +101,20 @@ tests move into `tests/`.
 
 ### `isl/include_data.py`
 
-- `load_split(name) -> list[Sample]`, where `Sample = (path, key)`; `name` is `include50_train|val|test`.
-  Split files and the label map are fetched once from GitHub into `data/meta/` and cached.
-- `label_key(folder)` and `display_name(key)` implement the naming rules below.
-- `RemoteZip(url)`: a seekable read-only file object over HTTP range requests (stdlib `urllib`), given to
-  `zipfile.ZipFile` so the central directory and single members are read without downloading the whole archive.
-- `build_index() -> {video_path: zip_name}`: reads the central directory of each of the 43 zips once and caches it in
-  `data/include_index.json`. Members are matched by path suffix (the zips may add a top-level folder).
-- `fetch_video(path, dest)`: streams one member to `dest`.
+- `load_split(split) -> list[Sample]` for `"train" | "val" | "test"`, where
+  `Sample = (path, key, display, split)`, read from the committed files in `isl/include50/`.
+  `load_label_keys()` gives the 50 keys in the official class order.
+- `label_key(folder)` and `display_name(folder)` implement the naming rules below.
+- `HttpSource(url)`: byte ranges of a remote file (stdlib `urllib`), with retries. It refuses a response that
+  isn't `206 Partial Content`, so a server ignoring the range can't start a 1.3 GB download.
+- `list_members(source, zip_name)`: reads a zip's central directory through a seekable, read-ahead wrapper handed to
+  `zipfile.ZipFile` (about 3 requests per zip).
+- `extract_member(source, member, dest)`: fetches one member's compressed bytes in **a single range request**,
+  inflates them while streaming to `dest.part`, checks the CRC, then renames to `dest`. Going through `zipfile` for
+  this would make thousands of tiny requests.
+- `build_index(paths) -> {path: Member}`: reads the directories of the zips in the needed categories once and caches
+  the member records (zip, offset, sizes, CRC, method) in `data/include_index.json`. Names match exactly.
+- `fetch_video(member, dest)`: `extract_member` from the right Zenodo zip.
 
 **Display names** (what the interpreter receives): the word folder without its number, lowercased except `I`, with
 overrides `biglarge → big`, `smalllittle → small`, `storeorshop → shop`. Stored in `models/labels.json`.
@@ -116,7 +128,8 @@ conflicts; the legacy `mp.solutions` API no longer exists):
   timestamps.
 - Frames are downscaled to 640 px wide before detection, the same for dataset videos and the webcam.
 - `extract(frame_bgr, timestamp_ms) -> RawLandmarks` (pixel-space pose points with visibility, 0–2 hands of 21
-  points each).
+  points each). `RawLandmarks` is a plain dataclass defined in `isl/features.py`, so the feature code and its tests
+  don't depend on MediaPipe.
 - The `.task` model files are downloaded to `models/` on first use from Google's `mediapipe-models` storage; if that
   fails, the error message gives the URLs to download by hand.
 
@@ -135,9 +148,12 @@ Per frame, from `RawLandmarks` (all coordinates in **pixels**, which removes the
     wrist (point 0) scaled by wrist → middle-finger knuckle (point 9) distance = 42 → 84 × 2 = 168
   - presence flag per hand = 2
   - a missing hand's block is zeros with presence 0
-- **Hands up:** at least one hand present with wrist y above `shoulder_mid_y + HANDS_UP_K × shoulder_width`
-  (image y grows downwards). `HANDS_UP_K` starts at 1.5 and is calibrated on real INCLUDE videos during
-  implementation (target: rest poses at the start and end of clips count as down).
+- `frame_features(raw) -> (features, body_found)`.
+- **Hands up:** `hands_up(features)` is true when at least one hand is present with its wrist above
+  `shoulder_mid_y + HANDS_UP_K × shoulder_width` (image y grows downwards). It is computed **from the feature vector**
+  (for one frame or a whole sequence), so changing `HANDS_UP_K` never requires re-extracting videos. `HANDS_UP_K`
+  starts at 1.5 and is calibrated on the prepared INCLUDE landmarks before the real training run (target: rest poses
+  at the start and end of clips count as down).
 - `trim(frames, up)`: keep from the first to the last hands-up frame with 2 frames of padding; if fewer than 4 frames
   are up, keep the whole clip.
 - `resample(frames, 32)`: linear interpolation along time to exactly `SEQUENCE_LENGTH = 32` frames.
@@ -146,16 +162,18 @@ Per frame, from `RawLandmarks` (all coordinates in **pixels**, which removes the
 
 ### `scripts/prepare_include50.py`
 
-For every video in the three INCLUDE-50 splits, skipping any whose `.npz` already exists:
+For every video in the three INCLUDE-50 splits (processed test first, then val, then train), skipping any whose
+`.npz` already exists:
 
 1. `fetch_video` into `data/tmp/`
 2. run `LandmarkExtractor` over every frame (timestamps from the video's frame rate)
-3. save `data/landmarks/<split>/<key>/<video-stem>.npz` with `features (T×184)`, `hands_up (T)`, `fps`, `key`
-4. keep the file in `data/examples/<key>.MOV` if it's the first **test**-split video for that word, else delete it
+3. save `data/landmarks/<split>/<key>/<video-stem>.npz` with `features (T×184)`, `fps`, `key`
+4. keep the file as `data/examples/<key>.MOV` if that word has no example yet, else delete it. Because test videos
+   come first, examples are test videos; the one word missing from the test split gets a val video.
 
 Errors on one video are logged to `data/failed.txt` and the run continues. The run prints progress and a summary.
-Peak disk use is one video plus the examples folder (about 0.6 GB).
-Expected cost: ~13 GB download, ~1 hour of CPU extraction.
+Peak disk use is one video plus the examples folder (about 0.8 GB).
+Expected cost: ~15 GB download, ~1 hour of CPU extraction.
 
 ### `isl/model.py`
 
@@ -173,17 +191,18 @@ Expected cost: ~13 GB download, ~1 hour of CPU extraction.
   (scikit-learn).
 - **BiGRU:** Adam (lr 1e-3), batch 32, up to 150 epochs, early stopping on the official **val** split
   (patience 25, restore best weights), fixed seeds.
-- **Augmentation** (training batches only): random flip (p = 0.5), scale ±10 %, rotation ±10°, speed change and
-  crop ±15 % before resampling, random frame dropout, Gaussian noise.
-- **Evaluation** on the official **test** split for both models: top-1, top-3, macro-F1, per-word accuracy,
-  inference time per sign.
+- **Augmentation** (`isl/augment.py`, training batches only): random flip (p = 0.5), scale ±10 %, rotation ±10°,
+  speed change and crop ±15 % before resampling, random frame dropout, Gaussian noise.
+- **Evaluation** on the official **test** split for both models: top-1, top-3, macro-F1 (over the words present in
+  the test split), per-word accuracy, inference time per sign.
 - **Writes:** `models/isl50_bigru.keras`, `models/labels.json`, `reports/metrics.json`,
   `reports/confusion_matrix.png`, `reports/results.md` (baseline vs BiGRU vs the paper's 94.5 % on INCLUDE-50).
 - `--smoke` runs on a tiny synthetic dataset for 2 epochs (used by tests).
 
 ### `isl/segmenter.py`
 
-`Segmenter.update(features, hands_up, now) -> Sign | None`, where a `Sign` holds that sign's frames.
+`Segmenter.update(features, now) -> sequence | None`: returns the model-ready `(32, 184)` sequence for a sign that
+has just ended (hands up is derived from the features).
 
 - **Start:** hands up for `START_SECONDS = 0.1`.
 - **End:** hands down for `END_SECONDS = 0.3`; the sign is the frames from its start to the last hands-up frame.
@@ -247,10 +266,10 @@ Loop: read frame → `LandmarkExtractor` on the **un-mirrored** frame → featur
 ## Dependencies
 
 - **Add:** `mediapipe==1.0.1`, `scikit-learn`, `matplotlib` (already pulled in by MediaPipe).
-- **Remove:** `tf-keras`.
-- **Keep:** `tensorflow==2.18.0` (provides Keras 3), `opencv-python`, `numpy`, `pyttsx3`, `groq`, `python-dotenv`.
-- MediaPipe 1.0.1 depends on `opencv-contrib-python`, which installs a second copy of the `cv2` module next to
-  `opencv-python`. The implementation must check that the two don't clash and keep only one if they do.
+- **Replace:** `opencv-python` with `opencv-contrib-python`. MediaPipe 1.0.1 requires the contrib package, and both
+  install the same `cv2` module, so only the contrib one is kept (it's a superset).
+- **Remove:** `tf-keras` (once the Teachable Machine code is gone).
+- **Keep:** `tensorflow==2.18.0` (provides Keras 3), `numpy<2.1`, `pyttsx3`, `groq`, `python-dotenv`.
 
 ## Success criteria
 

@@ -9,3 +9,7 @@ venv/
 
 # IDE
 .idea/
+
+# Dataset, landmarks and downloaded MediaPipe models (recreated by the scripts)
+data/
+models/*.task
