@@ -1,27 +1,48 @@
-# Sign Language Chatbot
+# ISL Sign Language Interpreter
 
-A sign language interpreter for deaf and hard-of-hearing people. It recognises hand signs from your webcam with a
-[Teachable Machine](https://teachablemachine.withgoogle.com/) model, turns them into a natural sentence with an LLM on
-[Groq](https://groq.com/), and speaks that sentence out loud to a hearing person.
+Recognises **Indian Sign Language (ISL) word signs** from a webcam, turns them into a natural sentence with an LLM on
+[Groq](https://groq.com/), and speaks it out loud, so a deaf or hard-of-hearing signer can talk to a hearing person.
+
+- **Vocabulary:** the 50 words of the INCLUDE-50 benchmark (hello, thank you, good morning, I, you (plural), happy,
+  teacher, father, brother, time, Monday, ...).
+- **How it works:** MediaPipe tracks the hands and upper body → body-normalised landmark sequences → a bidirectional
+  GRU classifies each sign → a Groq LLM phrases the sentence → text-to-speech.
+- **Everything is reproducible:** scripts download the dataset, extract landmarks, train and evaluate.
+
+## Results
+
+Official INCLUDE-50 test split: 192 videos (trained on 689, validated on 77).
+
+| Model | Top-1 | Top-3 | Macro-F1 |
+|---|---|---|---|
+| Baseline: logistic regression on summary features (deterministic) | 94.3% | 97.9% | 0.934 |
+| BiGRU on landmark sequences, mean ± std over 5 training runs | 95.5% ± 0.8 | 99.0% ± 0.5 | 0.953 ± 0.008 |
+| **BiGRU, saved model** (best validation accuracy of the 5 runs) | **96.4%** | 98.4% | 0.962 |
+| INCLUDE paper, best model on INCLUDE-50 | 94.5% | – | – |
+
+Averaged over 5 runs, the BiGRU scores +1.3 points top-1 against the baseline (run-to-run standard deviation 0.8 points).
+
+BiGRU inference: 4.7 ms per sign on CPU. Hardest words for the saved model: girl (50%), court (67%), fall (67%), boy (75%), hot (83%).
+
+INCLUDE's 7 signers appear in every split, so these are *seen-signer* results. Accuracy for a new signer and camera will be lower.
+
+![Confusion matrix](reports/confusion_matrix.png)
 
 ## How to use it
 
-1. Show **"done"** to start a sentence.
-2. Make your signs one after another (e.g. **"I love you"**). Put your hand down between signs.
-3. Show **"done"** again to send. The bot says your sentence out loud and shows it on screen.
+1. Sign a word, then lower your hands. The word appears at the bottom (`Signed:`).
+2. Sign more words the same way.
+3. Keep your hands down for 2 seconds. The ring fills up, the sentence is sent, and the bot says it out loud (`Said:`).
 
-Hold each sign steady for about a second. The ring in the top-right corner fills up and turns green when the sign
-is accepted. Each sign counts once, however long you hold it; to use the same sign again, put your hand down for
-half a second first. Showing "done" twice with no signs in between cancels. Press **Esc** or close the window to quit.
+**Backspace** removes the last word; **Esc** or closing the window quits. Sit so your shoulders are in view.
+Words the model isn't sure about show as "? maybe: ..." and aren't added.
 
-The video keeps running while the bot is thinking and speaking. The screen shows:
-
-- **Top:** what the model sees right now, with its confidence, and what the bot is doing
-- **Bottom:** the signs in the current sentence (`Signed:`) and the last sentence spoken (`Said:`)
+To learn how a word is signed, play its reference video: `python -m isl.examples thank you`
+(`python -m isl.examples` lists them).
 
 ## Setup (Windows)
 
-Requires **Python 3.9 – 3.12** (TensorFlow 2.18 does not support 3.13+).
+Requires **Python 3.9 – 3.12**.
 
 ```bash
 py -3.12 -m venv .venv
@@ -29,42 +50,60 @@ py -3.12 -m venv .venv
 pip install -r requirements.txt
 ```
 
-Get a free API key from https://console.groq.com/keys, then copy `.env.example` to `.env` and paste it in:
-
-```
-GROQ_API_KEY=your-key-here
-```
-
-## Run
+Copy `.env.example` to `.env` and paste your free key from https://console.groq.com/keys. The MediaPipe models
+(14 MB) download automatically the first time you run the app.
 
 ```bash
 python signlan.py
 ```
 
-`Gesture.py` is a minimal webcam preview for checking that your camera works.
+The trained model is in `models/`, so the app works without the dataset.
 
-## Tests
+## Reproducing the model
 
 ```bash
-python -m unittest -v
+python scripts/prepare_include50.py   # ~15 GB streamed from Zenodo, ~1-2 hours; safe to stop and re-run
+python scripts/train.py               # ~5-10 minutes on CPU; writes models/ and reports/
 ```
 
-## Files
+`prepare_include50.py` reads only the 958 INCLUDE-50 videos out of the 57 GB dataset. It uses HTTP range requests
+to fetch single files from inside the Zenodo zips (8 at a time, since Zenodo limits each connection to about
+0.3 MB/s), turns each video into landmarks, then deletes it.
 
-| File | Purpose |
+`train.py` trains the baseline once (it's deterministic) and the BiGRU with 5 random seeds (`--seeds N`), reports the
+mean and spread, and saves the run with the best **validation** accuracy. The test split is only used for reporting.
+
+## Project layout
+
+| Path | Purpose |
 |---|---|
-| `signlan.py` | Main app: webcam → sign recognition → sentence → Groq interpreter → text-to-speech |
-| `keras_model.h5`, `labels.txt` | Teachable Machine model and its class labels (`I love you`, `done`, `Background`) |
-| `Gesture.py` | Webcam test |
-| `test_signlan.py` | Unit tests |
+| `signlan.py` | Live app: webcam → landmarks → segmenter → model → sentence → Groq → speech |
+| `isl/features.py` | Landmarks → 184 body-normalised numbers per frame (shared by training and the app) |
+| `isl/landmarks.py` | MediaPipe hand + pose tracking |
+| `isl/segmenter.py` | Cuts the live stream into single signs (hands up → sign → hands down) |
+| `isl/model.py` | The BiGRU: build, save, load, predict |
+| `isl/augment.py` | Training-time variations (flip, rotate, scale, speed, noise) |
+| `isl/include_data.py` | INCLUDE-50 splits and labels; range-fetching videos from Zenodo |
+| `scripts/` | Dataset preparation and training |
+| `reports/` | Measured results and confusion matrix |
+| `tests/` | Unit, smoke and end-to-end tests: `python -m unittest discover -s tests -t . -v` |
 
-## Notes
+## Limitations
 
-- Teachable Machine exports Keras 2 models, which Keras 3 can't load, so the model is loaded with `tf-keras`.
-- To use a different Groq model, set `GROQ_MODEL` in `.env` (see https://console.groq.com/docs/models).
-- To recognise your own signs, train an image model in Teachable Machine, export it as
-  *Tensorflow → Keras*, and replace `keras_model.h5` and `labels.txt`. Update `WAKE_WORD` in `signlan.py` to match.
-- The camera image is mirrored, like Teachable Machine's webcam (its **Flip** setting, on by default). If you train
-  with Flip off or from uploaded photos, set `MIRROR = False` in `signlan.py`.
-- Tuning knobs at the top of `signlan.py`: `CONFIDENCE_THRESHOLD` (lower it if signs are rarely accepted),
-  `HOLD_SECONDS` (how long to hold a sign), and `SYSTEM_PROMPT` (how the interpreter phrases sentences).
+- INCLUDE has 7 signers, and the same people appear in every split. The results above measure *seen signers*, so
+  expect lower accuracy for a new signer, camera and room.
+- Only the 50 INCLUDE-50 words are recognised. The pipeline supports the full 263-word INCLUDE set with a split
+  change, but that hasn't been trained or evaluated.
+- One sign at a time: lower your hands between signs, and sign above mid-chest (the hands-up threshold was
+  calibrated on INCLUDE, where resting hands sit around hip height).
+- The saved model's 7 test mistakes: boy ↔ girl (both ways), court → shop, hot → shop, dog → long, fall → it,
+  train ticket → teacher. A simple baseline already reaches 94.3%, so most of the accuracy comes from the
+  body-normalised landmark features; the BiGRU adds about 1.3 points on average.
+
+## Credits
+
+Dataset: **INCLUDE** by A. Sridhar, R. G. Ganesan, P. Kumar and M. Khapra, "INCLUDE: A Large Scale Dataset for
+Indian Sign Language Recognition", ACM Multimedia 2020. Videos under CC-BY-4.0 from
+[Zenodo record 4010759](https://zenodo.org/record/4010759); split lists from
+[AI4Bharat/INCLUDE](https://github.com/AI4Bharat/INCLUDE) (MIT), see `isl/include50/SOURCE.md`.
+Hand and pose tracking: [MediaPipe](https://ai.google.dev/edge/mediapipe).
