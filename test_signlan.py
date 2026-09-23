@@ -82,6 +82,41 @@ class SignTrackerTests(unittest.TestCase):
         results = self.feed(tracker, [("done", 95, t / 10) for t in range(0, 40)])
         self.assertEqual([r for r in results if r], ["done"])
 
+    def test_confidence_dip_while_still_holding_does_not_repeat_the_sign(self):
+        # Regression: holding "I love you" with one frame dipping under the threshold accepted it twice
+        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
+        frames = ([("I love you", 99, t / 10) for t in range(0, 11)] + [("I love you", 70, 1.1)]
+                  + [("I love you", 87, t / 10) for t in range(12, 40)])
+        self.assertEqual([r for r in self.feed(tracker, frames) if r], ["I love you"])
+
+    def test_brief_flicker_to_another_sign_does_not_repeat_the_sign(self):
+        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
+        frames = ([("done", 90, t / 10) for t in range(0, 11)] + [("I love you", 85, 1.1), ("Background", 60, 1.2)]
+                  + [("done", 90, t / 10) for t in range(13, 40)])
+        self.assertEqual([r for r in self.feed(tracker, frames) if r], ["done"])
+
+    def test_same_sign_counts_again_after_hand_goes_down(self):
+        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
+        frames = ([("done", 90, t / 10) for t in range(0, 11)]
+                  + [("Background", 60, t / 10) for t in range(11, 18)]  # hand down for 0.7s
+                  + [("done", 90, t / 10) for t in range(18, 30)])
+        results = self.feed(tracker, frames)
+        self.assertEqual([r for r in results if r], ["done", "done"])
+        self.assertGreaterEqual(results.index("done", 11), 28)  # second "done" needed its own full 1s hold
+
+    def test_different_sign_counts_straight_away(self):
+        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
+        frames = [("done", 90, t / 10) for t in range(0, 11)] + [("I love you", 95, t / 10) for t in range(11, 25)]
+        self.assertEqual([r for r in self.feed(tracker, frames) if r], ["done", "I love you"])
+
+    def test_reset_keeps_the_last_sign_blocked(self):
+        # While the bot is busy the hold is reset; a sign still held afterwards must not fire again
+        tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80, release_seconds=0.5)
+        self.feed(tracker, [("done", 90, t / 10) for t in range(0, 11)])
+        tracker.reset()
+        results = self.feed(tracker, [("done", 90, t / 10) for t in range(40, 60)])
+        self.assertEqual([r for r in results if r], [])
+
     def test_progress_fills_while_holding(self):
         tracker = signlan.SignTracker(hold_seconds=1.0, threshold=80)
         self.assertEqual(tracker.progress(now=0.0), 0.0)

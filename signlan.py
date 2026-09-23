@@ -35,6 +35,7 @@ BACKGROUND = "Background"  # "no sign" class, never sent to the chatbot
 
 CONFIDENCE_THRESHOLD = 80  # Only accept predictions above this confidence (%)
 HOLD_SECONDS = 1.0  # A sign must be confidently held this long to count
+RELEASE_SECONDS = 0.5  # ...and be gone this long before the same sign can count again
 
 # Teachable Machine mirrors webcam samples by default (its "Flip" setting), so mirror the camera
 # the same way. Set to False if your model was trained with Flip off or from uploaded photos
@@ -68,35 +69,48 @@ def preprocess(frame):
 class SignTracker:
     """Turns noisy per-frame predictions into a single event per deliberately held sign"""
 
-    def __init__(self, hold_seconds=HOLD_SECONDS, threshold=CONFIDENCE_THRESHOLD):
+    def __init__(self, hold_seconds=HOLD_SECONDS, threshold=CONFIDENCE_THRESHOLD, release_seconds=RELEASE_SECONDS):
         self.hold_seconds = hold_seconds
         self.threshold = threshold
+        self.release_seconds = release_seconds
+        self.last_fired = None  # Blocked from firing again until it has been released
+        self.gone_since = None
         self.reset()
 
     def reset(self):
+        """Drop the current hold (the last accepted sign stays blocked until released)"""
         self.label = None
         self.since = None
-        self.fired = False
 
     def update(self, label, confidence, now=None):
         """Return the label once it has been confidently held for hold_seconds, else None.
-        Fires only once per hold, so a sign kept up longer isn't repeated"""
+        A sign fires once and must then be gone for release_seconds before it can fire again,
+        so holding it longer, or a brief dip in confidence, doesn't repeat it"""
         now = time.monotonic() if now is None else now
+
+        if self.last_fired is not None:
+            if label == self.last_fired:  # Still showing it, even if less confidently
+                self.gone_since = None
+            elif self.gone_since is None:
+                self.gone_since = now
+            elif now - self.gone_since >= self.release_seconds:
+                self.last_fired = None
+
         if confidence <= self.threshold:
             self.reset()
             return None
         if label != self.label:
-            self.label, self.since, self.fired = label, now, False
-        if self.fired or now - self.since < self.hold_seconds:
+            self.label, self.since = label, now
+        if label == self.last_fired or now - self.since < self.hold_seconds:
             return None
-        self.fired = True
+        self.last_fired, self.gone_since = label, None
         return label
 
     def progress(self, now=None):
         """How far (0 to 1) the current sign is towards being accepted"""
         if self.label is None:
             return 0.0
-        if self.fired:
+        if self.label == self.last_fired:
             return 1.0
         now = time.monotonic() if now is None else now
         return min((now - self.since) / self.hold_seconds, 1.0)

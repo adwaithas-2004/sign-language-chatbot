@@ -11,7 +11,8 @@ A sign language interpreter for deaf and hard-of-hearing people. It recognises h
 3. Show **"done"** again to send. The bot says your sentence out loud and shows it on screen.
 
 Hold each sign steady for about a second. The ring in the top-right corner fills up and turns green when the sign
-is accepted. Showing "done" twice with no signs in between cancels. Press **Esc** or close the window to quit.
+is accepted. Each sign counts once, however long you hold it; to use the same sign again, put your hand down for
+half a second first. Showing "done" twice with no signs in between cancels. Press **Esc** or close the window to quit.
 
 The video keeps running while the bot is thinking and speaking. The screen shows:
 
