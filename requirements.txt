@@ -1,0 +1,8 @@
+# Needs Python 3.9 - 3.12 (TensorFlow 2.18 has no wheels for 3.13+)
+tensorflow==2.18.0
+tf-keras==2.18.0
+opencv-python>=4.8
+numpy
+pyttsx3>=2.98
+groq>=1.0
+python-dotenv>=1.0
