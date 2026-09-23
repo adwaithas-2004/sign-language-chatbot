@@ -33,8 +33,9 @@ The project is a **portfolio / GitHub showcase**: the value is a reproducible en
 ## Dataset facts (verified)
 
 - INCLUDE on Zenodo, record 4010759, licence **CC-BY-4.0**. 15 categories in **44 zips** of 0.8–1.8 GB (56.8 GB
-  total). Zenodo serves HTTP range requests (verified: `206 Partial Content`). Zip members are named exactly like the
-  split paths, are deflate-compressed, and average 15.7 MB per video.
+  total). Zenodo serves HTTP range requests (verified: `206 Partial Content`). Zip members are named like the
+  split paths except that some are `.MP4` where the split says `.MOV`; they are deflate-compressed and average
+  15.7 MB per video.
 - Official split lists and label maps: GitHub `AI4Bharat/INCLUDE` (MIT licence, branch `master`),
   `train_test_paths/include50_{train,val,test}.txt` and `label_maps/label_map_include50.json`. These four small files
   are **committed** into `isl/include50/` with a `SOURCE.md` credit, so nothing needs fetching to read the splits.
@@ -113,7 +114,9 @@ tests move into `tests/`.
   inflates them while streaming to `dest.part`, checks the CRC, then renames to `dest`. Going through `zipfile` for
   this would make thousands of tiny requests.
 - `build_index(paths) -> {path: Member}`: reads the directories of the zips in the needed categories once and caches
-  the member records (zip, offset, sizes, CRC, method) in `data/include_index.json`. Names match exactly.
+  the member records (zip, offset, sizes, CRC, method) in `data/include_index.json`. Paths are matched **without
+  their extension, ignoring case**: the split lists call every video `.MOV`, but some are `.MP4` inside the zips
+  (7 of the 29 Seasons videos, for example).
 - `fetch_video(member, dest)`: `extract_member` from the right Zenodo zip.
 
 **Display names** (what the interpreter receives): the word folder without its number, lowercased except `I`, with
