@@ -18,7 +18,7 @@ import keras  # noqa: E402
 from isl import include_data  # noqa: E402
 from isl.augment import augment  # noqa: E402
 from isl.features import NUM_FEATURES, hands_up, resample, trim  # noqa: E402
-from isl.model import build_model, save_labels  # noqa: E402
+from isl.model import Recogniser, build_model, save_labels  # noqa: E402
 
 LANDMARKS_DIR = include_data.DATA_DIR / "landmarks"
 PAPER_TOP1 = 0.945  # best INCLUDE-50 result reported in the INCLUDE paper
@@ -96,7 +96,7 @@ def train_bigru(train_clips, y_train, X_val, y_val, num_classes, epochs, rng):
         if since_best >= PATIENCE:
             break
     model.set_weights(best_weights)
-    return model, best_epoch
+    return model, best_epoch, best_accuracy
 
 
 def metrics(probabilities, y, keys):
@@ -111,6 +111,16 @@ def metrics(probabilities, y, keys):
         "macro_f1": float(f1_score(y, predicted, labels=present, average="macro", zero_division=0)),
         "per_word": {keys[i]: float(np.mean(predicted[y == i] == i)) for i in present},
     }
+
+
+def summarise_runs(runs):
+    """Mean and spread (sample standard deviation) of each metric over several training runs"""
+    summary = {}
+    for name in ("top1", "top3", "macro_f1"):
+        values = np.array([run[name] for run in runs])
+        summary[f"{name}_mean"] = float(values.mean())
+        summary[f"{name}_std"] = float(values.std(ddof=1)) if len(values) > 1 else 0.0
+    return summary
 
 
 def save_confusion_matrix(probabilities, y, words, path):
@@ -133,22 +143,31 @@ def save_confusion_matrix(probabilities, y, words, path):
 
 
 def results_markdown(report):
-    baseline, bigru, counts = report["baseline"], report["bigru"], report["counts"]
+    baseline, bigru, counts, seeds = report["baseline"], report["bigru"], report["counts"], report["bigru_seeds"]
+    runs = len(seeds["runs"])
     hardest = sorted(bigru["per_word"].items(), key=lambda item: item[1])[:5]
+    gap = seeds["top1_mean"] - baseline["top1"]
     return "\n".join([
         f"Official INCLUDE-50 test split: {counts['test']} videos "
         f"(trained on {counts['train']}, validated on {counts['val']}).",
         "",
         "| Model | Top-1 | Top-3 | Macro-F1 |",
         "|---|---|---|---|",
-        f"| Baseline: logistic regression on summary features | {baseline['top1']:.1%} | {baseline['top3']:.1%} "
-        f"| {baseline['macro_f1']:.3f} |",
-        f"| **BiGRU on landmark sequences (this project)** | **{bigru['top1']:.1%}** | {bigru['top3']:.1%} "
-        f"| {bigru['macro_f1']:.3f} |",
+        f"| Baseline: logistic regression on summary features (deterministic) | {baseline['top1']:.1%} "
+        f"| {baseline['top3']:.1%} | {baseline['macro_f1']:.3f} |",
+        f"| BiGRU on landmark sequences, mean ± std over {runs} training runs "
+        f"| {seeds['top1_mean']:.1%} ± {seeds['top1_std'] * 100:.1f} | {seeds['top3_mean']:.1%} ± "
+        f"{seeds['top3_std'] * 100:.1f} | {seeds['macro_f1_mean']:.3f} ± {seeds['macro_f1_std']:.3f} |",
+        f"| **BiGRU, saved model** (best validation accuracy of the {runs} runs) | **{bigru['top1']:.1%}** "
+        f"| {bigru['top3']:.1%} | {bigru['macro_f1']:.3f} |",
         f"| INCLUDE paper, best model on INCLUDE-50 | {report['paper_top1']:.1%} | – | – |",
         "",
+        f"Averaged over {runs} runs, the BiGRU scores {gap * 100:+.1f} points top-1 against the baseline "
+        f"(run-to-run standard deviation {seeds['top1_std'] * 100:.1f} points).",
+        "",
         f"BiGRU inference: {report['inference_ms']:.1f} ms per sign on CPU. "
-        f"Hardest words: " + ", ".join(f"{word} ({accuracy:.0%})" for word, accuracy in hardest) + ".",
+        f"Hardest words for the saved model: "
+        + ", ".join(f"{word} ({accuracy:.0%})" for word, accuracy in hardest) + ".",
         "",
         "INCLUDE's 7 signers appear in every split, so these are *seen-signer* results. "
         "Accuracy for a new signer and camera will be lower.",
@@ -161,6 +180,7 @@ def main(argv=None):
     parser.add_argument("--smoke", action="store_true", help="quick run on a tiny synthetic dataset")
     parser.add_argument("--out", type=Path, default=ROOT, help="folder that gets models/ and reports/")
     parser.add_argument("--epochs", type=int, default=150)
+    parser.add_argument("--seeds", type=int, default=5, help="train the BiGRU this many times with different seeds")
     args = parser.parse_args(argv)
 
     keras.utils.set_random_seed(SEED)
@@ -181,27 +201,44 @@ def main(argv=None):
     X = {split: np.stack([resample(clip) for clip in clips[split][0]]) for split in clips}
     y = {split: clips[split][1] for split in clips}
 
-    baseline = train_baseline(X["train"], y["train"])
-    bigru, best_epoch = train_bigru(clips["train"][0], y["train"], X["val"], y["val"], len(keys), epochs, rng)
+    baseline = train_baseline(X["train"], y["train"])  # deterministic, so trained once
 
-    bigru_test = predict(bigru, X["test"])
+    # One BiGRU run can be lucky or unlucky, so train several and report the spread
+    runs, best = [], None
+    for seed in range(SEED, SEED + args.seeds):
+        keras.utils.set_random_seed(seed)
+        model, best_epoch, val_accuracy = train_bigru(clips["train"][0], y["train"], X["val"], y["val"], len(keys),
+                                                      epochs, np.random.default_rng(seed))
+        test_probabilities = predict(model, X["test"])
+        result = metrics(test_probabilities, y["test"], keys)
+        runs.append({"seed": seed, "val_accuracy": val_accuracy, "best_epoch": best_epoch,
+                     **{name: result[name] for name in ("top1", "top3", "macro_f1")}})
+        print(f"seed {seed}: val acc {val_accuracy:.3f}  test top-1 {result['top1']:.3f}", flush=True)
+        if best is None or val_accuracy > best["val_accuracy"]:  # chosen by validation, never by test accuracy
+            best = {"model": model, "probabilities": test_probabilities, "seed": seed, "epoch": best_epoch,
+                    "val_accuracy": val_accuracy}
+
+    recogniser = Recogniser(best["model"], keys, displays)  # timed the way the live app predicts
+    recogniser.predict(X["test"][0])
     start = time.perf_counter()
     for sequence in X["test"][:20]:
-        bigru(sequence[None], training=False)
+        recogniser.predict(sequence)
     inference_ms = (time.perf_counter() - start) / min(20, len(X["test"])) * 1000
 
     report = {"counts": counts,
               "baseline": metrics(baseline_probabilities(baseline, X["test"], len(keys)), y["test"], keys),
-              "bigru": metrics(bigru_test, y["test"], keys),
-              "inference_ms": inference_ms, "paper_top1": PAPER_TOP1, "epochs_trained": best_epoch}
+              "bigru": metrics(best["probabilities"], y["test"], keys),
+              "bigru_seeds": {**summarise_runs(runs), "runs": runs},
+              "saved_seed": best["seed"], "epochs_trained": best["epoch"],
+              "inference_ms": inference_ms, "paper_top1": PAPER_TOP1}
 
     models_dir, reports_dir = args.out / "models", args.out / "reports"
     models_dir.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
-    bigru.save(models_dir / "isl50_bigru.keras")
+    best["model"].save(models_dir / "isl50_bigru.keras")
     save_labels(models_dir / "labels.json", keys, displays)
     (reports_dir / "metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    save_confusion_matrix(bigru_test, y["test"], displays, reports_dir / "confusion_matrix.png")
+    save_confusion_matrix(best["probabilities"], y["test"], displays, reports_dir / "confusion_matrix.png")
     (reports_dir / "results.md").write_text(results_markdown(report), encoding="utf-8")
     print(results_markdown(report))
 
