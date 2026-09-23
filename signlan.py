@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -22,15 +23,26 @@ load_dotenv(BASE_DIR / ".env")
 # llama3-8b-8192 has been shut down by Groq; set GROQ_MODEL in .env to use another model
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
-SYSTEM_PROMPT = ("You are a helper assisting deaf and hard-of-hearing individuals by interpreting sign language. "
-                 "you have to give them short reply in 8 words.")
+SYSTEM_PROMPT = ("You are a sign language interpreter for a deaf or hard-of-hearing person. "
+                 "You are given the signs they made, in order, as English words. "
+                 "Turn them into one short, natural sentence in the first person that says what they mean, "
+                 "to be spoken aloud to a hearing person. Reply with only that sentence, in at most 12 words.")
 
-# Define wake word gesture (label text from labels.txt, without the number)
+# Show the wake word sign to start a sentence, make your signs, then show it again to send.
+# Label text from labels.txt, without the number
 WAKE_WORD = "done"
 BACKGROUND = "Background"  # "no sign" class, never sent to the chatbot
 
 CONFIDENCE_THRESHOLD = 80  # Only accept predictions above this confidence (%)
 HOLD_SECONDS = 1.0  # A sign must be confidently held this long to count
+
+# Teachable Machine mirrors webcam samples by default (its "Flip" setting), so mirror the camera
+# the same way. Set to False if your model was trained with Flip off or from uploaded photos
+MIRROR = True
+
+WINDOW_NAME = "Sign Language Recognition"
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+GREEN, YELLOW, WHITE, GREY = (0, 200, 0), (0, 220, 255), (255, 255, 255), (170, 170, 170)
 
 
 def load_labels(path):
@@ -80,23 +92,54 @@ class SignTracker:
         self.fired = True
         return label
 
+    def progress(self, now=None):
+        """How far (0 to 1) the current sign is towards being accepted"""
+        if self.label is None:
+            return 0.0
+        if self.fired:
+            return 1.0
+        now = time.monotonic() if now is None else now
+        return min((now - self.since) / self.hold_seconds, 1.0)
 
-def customLLMBot(client, messages, user_input):
-    """Send the recognised sign to the chatbot and return its reply (None on failure)"""
-    messages.append({"role": "user", "content": user_input})
+
+class SentenceBuilder:
+    """Collects accepted signs into a sentence: the wake word starts it, the wake word again finishes it"""
+
+    def __init__(self):
+        self.collecting = False
+        self.signs = []
+
+    def add(self, sign):
+        """Feed an accepted sign. Returns the list of signs when the sentence is finished,
+        an empty list if it was cancelled (wake word twice with nothing in between), otherwise None"""
+        if sign == BACKGROUND:
+            return None
+        if not self.collecting:
+            if sign == WAKE_WORD:
+                self.collecting, self.signs = True, []
+            return None
+        if sign != WAKE_WORD:
+            self.signs.append(sign)
+            return None
+        sentence, self.signs, self.collecting = self.signs, [], False
+        return sentence
+
+
+def interpret(client, signs):
+    """Ask the LLM to turn a list of signs into a sentence to speak (None on failure)"""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": "Signs: " + " / ".join(signs)},
+    ]
     try:
         response = client.chat.completions.create(
             messages=messages,
             model=GROQ_MODEL,
         )
     except APIError as e:  # Bad key, no internet, rate limit... keep the camera running
-        messages.pop()
         print(f"Chatbot error: {e}")
         return None
-
-    LLM_reply = (response.choices[0].message.content or "").strip()
-    messages.append({"role": "assistant", "content": LLM_reply})
-    return LLM_reply
+    return (response.choices[0].message.content or "").strip().strip('"') or None
 
 
 def speak(text):
@@ -111,15 +154,91 @@ def speak(text):
     engine.stop()
 
 
+class Responder:
+    """Interprets and speaks a sentence in a background thread so the video keeps running"""
+
+    def __init__(self, client):
+        self.client = client
+        self.status = ""  # What the bot is doing right now, shown on screen
+        self.heard = []  # Signs of the last sentence sent
+        self.reply = ""  # Last sentence spoken
+        self._thread = None
+
+    @property
+    def busy(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, signs):
+        self.heard, self.reply, self.status = signs, "", "Thinking..."
+        self._thread = threading.Thread(target=self._run, args=(signs,), daemon=True)
+        self._thread.start()
+
+    def _run(self, signs):
+        try:
+            reply = interpret(self.client, signs)
+            if reply is None:
+                self.reply = "(no reply - see the console for the error)"
+                return
+            print(f"Chatbot Reply: {reply}")
+            self.reply = reply
+            self.status = "Speaking..."
+            speak(reply)
+        finally:
+            self.status = ""
+
+    def wait(self, timeout=None):
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+
+def wrap_text(text, max_width, scale, thickness=2):
+    """Split text into lines no wider than max_width pixels"""
+    lines, line = [], ""
+    for word in text.split():
+        candidate = f"{line} {word}".strip()
+        if line and cv2.getTextSize(candidate, FONT, scale, thickness)[0][0] > max_width:
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    if line:
+        lines.append(line)
+    return lines
+
+
+def shade(frame, top, bottom):
+    """Darken a horizontal band of the frame so text on it is easy to read"""
+    frame[top:bottom] = (frame[top:bottom] * 0.4).astype(np.uint8)
+
+
+def draw_overlay(frame, prediction_text, confident, progress, status, captions):
+    """Draw the current prediction, hold-progress ring, status line and captions onto the frame"""
+    height, width = frame.shape[:2]
+
+    shade(frame, 0, 75)
+    cv2.putText(frame, prediction_text, (10, 30), FONT, 0.8, GREEN if confident else GREY, 2)
+    cv2.putText(frame, status, (10, 62), FONT, 0.7, YELLOW, 2)
+
+    # Ring that fills up while a sign is held, turning green once it's accepted
+    if progress > 0:
+        centre, radius = (width - 40, 38), 24
+        cv2.circle(frame, centre, radius, GREY, 2)
+        cv2.ellipse(frame, centre, (radius, radius), -90, 0, 360 * progress,
+                    GREEN if progress >= 1 else YELLOW, 5)
+
+    lines = [line for caption in captions for line in wrap_text(caption, width - 20, 0.7)]
+    if lines:
+        top = height - 30 * len(lines) - 15
+        shade(frame, top, height)
+        for i, line in enumerate(lines):
+            cv2.putText(frame, line, (10, top + 30 * (i + 1)), FONT, 0.7, WHITE, 2)
+
+
 def main():
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         raise SystemExit("GROQ_API_KEY is not set. Copy .env.example to .env and paste in your key "
                          "from https://console.groq.com/keys")
-
-    # Initialize Groq client
-    client = Groq(api_key=api_key)
-    messages_prmt = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     # Load the trained sign language model and its class labels
     model = load_model(MODEL_PATH, compile=False)
@@ -134,14 +253,18 @@ def main():
         raise SystemExit("Could not open the webcam")
 
     tracker = SignTracker()
-    wake_word_detected = False  # Flag to track if wake word has been used
-    print(f'Show the "{WAKE_WORD}" sign to wake the bot, then show your message. Press Esc to quit.')
+    builder = SentenceBuilder()
+    responder = Responder(Groq(api_key=api_key))
+    print(f'Show "{WAKE_WORD}" to start, sign your words, then show "{WAKE_WORD}" again to send. '
+          f"Press Esc to quit.")
 
     while True:
         # Capture webcam image
         ret, frame = camera.read()
         if not ret:
             break
+        if MIRROR:
+            frame = cv2.flip(frame, 1)
 
         # Predict the sign language gesture
         prediction = model(preprocess(frame), training=False).numpy()
@@ -149,39 +272,50 @@ def main():
         class_name = class_names[index]  # Get predicted label
         confidence_score = prediction[0][index] * 100  # Convert to percentage
 
-        # Show the live webcam feed with the current prediction
-        status = "Listening for a sign..." if wake_word_detected else f'Show "{WAKE_WORD}" to start'
-        cv2.putText(frame, f"{class_name} ({confidence_score:.0f}%)", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame, status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.imshow("Sign Language Recognition", frame)
+        if responder.busy:
+            tracker.reset()  # Ignore signs while the bot is thinking or speaking
+        else:
+            sign = tracker.update(class_name, confidence_score)
+            if sign is not None:
+                print(f"Recognized Sign: {sign} (Confidence: {confidence_score:.2f}%)")
+                was_collecting = builder.collecting
+                sentence = builder.add(sign)
+                if sentence:
+                    print(f"Sending: {' / '.join(sentence)}")
+                    responder.start(sentence)
+                elif sentence == []:
+                    print("Nothing signed, cancelled.")
+                elif builder.collecting and not was_collecting:
+                    print(f'Listening... sign your words, then "{WAKE_WORD}" to send.')
 
-        sign = tracker.update(class_name, confidence_score)
-        if sign is not None:
-            print(f"Recognized Sign: {sign} (Confidence: {confidence_score:.2f}%)")
-            if not wake_word_detected:
-                if sign == WAKE_WORD:
-                    print("Wake Word Detected! Ready for command.")
-                    wake_word_detected = True
-            elif sign not in (WAKE_WORD, BACKGROUND):
-                chatbot_response = customLLMBot(client, messages_prmt, sign)
-                if chatbot_response:
-                    print(f"Chatbot Reply: {chatbot_response}")
+        # Show the live webcam feed with what the bot sees, hears and says
+        if responder.busy:
+            status = responder.status
+        elif builder.collecting:
+            status = f'Sign your words, then "{WAKE_WORD}" to send'
+        else:
+            status = f'Show "{WAKE_WORD}" to start'
 
-                    # Convert chatbot text to speech
-                    speak(chatbot_response)
+        signed = builder.signs if builder.collecting else responder.heard
+        captions = []
+        if signed or builder.collecting:
+            captions.append("Signed: " + (" / ".join(signed) or "..."))
+        if responder.reply and not builder.collecting:
+            captions.append("Said: " + responder.reply)
 
-                # Reset wake word flag after responding; the next sign must be held afresh
-                wake_word_detected = False
-                tracker.reset()
+        show_ring = class_name != BACKGROUND and not responder.busy
+        draw_overlay(frame, f"{class_name} ({confidence_score:.0f}%)", confidence_score > CONFIDENCE_THRESHOLD,
+                     tracker.progress() if show_ring else 0.0, status, captions)
+        cv2.imshow(WINDOW_NAME, frame)
 
-        # Press "Esc" (ASCII 27) to exit
-        if cv2.waitKey(1) == 27:
+        # Press "Esc" (ASCII 27) or close the window to exit
+        if cv2.waitKey(1) == 27 or cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
             break
 
     # Release camera and close windows
     camera.release()
     cv2.destroyAllWindows()
+    responder.wait(timeout=10)  # Let a reply that's being spoken finish
 
 
 if __name__ == "__main__":

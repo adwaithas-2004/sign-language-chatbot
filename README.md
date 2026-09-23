@@ -1,10 +1,22 @@
 # Sign Language Chatbot
 
-Recognises hand signs from your webcam with a [Teachable Machine](https://teachablemachine.withgoogle.com/) model,
-sends the recognised sign to an LLM on [Groq](https://groq.com/), and speaks the reply out loud.
+A sign language interpreter for deaf and hard-of-hearing people. It recognises hand signs from your webcam with a
+[Teachable Machine](https://teachablemachine.withgoogle.com/) model, turns them into a natural sentence with an LLM on
+[Groq](https://groq.com/), and speaks that sentence out loud to a hearing person.
 
-**How to use it:** show the **"done"** sign to wake the bot, then show a sign (e.g. **"I love you"**).
-Hold each sign steady for about a second. The bot replies in text and speech. Press **Esc** to quit.
+## How to use it
+
+1. Show **"done"** to start a sentence.
+2. Make your signs one after another (e.g. **"I love you"**). Put your hand down between signs.
+3. Show **"done"** again to send. The bot says your sentence out loud and shows it on screen.
+
+Hold each sign steady for about a second. The ring in the top-right corner fills up and turns green when the sign
+is accepted. Showing "done" twice with no signs in between cancels. Press **Esc** or close the window to quit.
+
+The video keeps running while the bot is thinking and speaking. The screen shows:
+
+- **Top:** what the model sees right now, with its confidence, and what the bot is doing
+- **Bottom:** the signs in the current sentence (`Signed:`) and the last sentence spoken (`Said:`)
 
 ## Setup (Windows)
 
@@ -40,7 +52,7 @@ python -m unittest -v
 
 | File | Purpose |
 |---|---|
-| `signlan.py` | Main app: webcam → sign recognition → Groq chatbot → text-to-speech |
+| `signlan.py` | Main app: webcam → sign recognition → sentence → Groq interpreter → text-to-speech |
 | `keras_model.h5`, `labels.txt` | Teachable Machine model and its class labels (`I love you`, `done`, `Background`) |
 | `Gesture.py` | Webcam test |
 | `test_signlan.py` | Unit tests |
@@ -51,3 +63,7 @@ python -m unittest -v
 - To use a different Groq model, set `GROQ_MODEL` in `.env` (see https://console.groq.com/docs/models).
 - To recognise your own signs, train an image model in Teachable Machine, export it as
   *Tensorflow → Keras*, and replace `keras_model.h5` and `labels.txt`. Update `WAKE_WORD` in `signlan.py` to match.
+- The camera image is mirrored, like Teachable Machine's webcam (its **Flip** setting, on by default). If you train
+  with Flip off or from uploaded photos, set `MIRROR = False` in `signlan.py`.
+- Tuning knobs at the top of `signlan.py`: `CONFIDENCE_THRESHOLD` (lower it if signs are rarely accepted),
+  `HOLD_SECONDS` (how long to hold a sign), and `SYSTEM_PROMPT` (how the interpreter phrases sentences).
