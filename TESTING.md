@@ -42,7 +42,7 @@ notepad .env
 
 Replace `your-groq-api-key-here` with your key and save. Don't share this file: it holds your key.
 
-## 4. Automated tests (30 seconds)
+## 4. Automated tests (1–2 minutes)
 
 These need no webcam, key or internet:
 
