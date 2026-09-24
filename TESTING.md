@@ -80,9 +80,10 @@ A window shows your camera. Press Esc to close it.
 The first run downloads the MediaPipe models (14 MB). A window called "Sign Language Recognition" opens with a mirrored
 camera view.
 
-Sit about 1–1.5 m from the camera so your head, shoulders and hands down to your waist are in view, with light
-from the front. Lines are drawn over your arms and hands, and the top left says **Sign a word**. If it says
-**Move back so your shoulders are visible**, move back.
+Sit so the camera sees you from a little above your head down to at least your chest, ideally your waist, with
+light from the front. At a laptop, tilting the screen changes how much of you it sees. Lines are drawn over your
+arms and hands, and the top left says **Sign a word**. If it says **Move back so your shoulders are visible** or
+**Move back or tilt the camera down**, the camera is too close.
 
 ### Learn a few signs
 
@@ -112,16 +113,18 @@ Between signs, lower your hands to your lap or out of view.
 | 5 | Rest your hands on the desk or your lap for 15 seconds | Nothing is recognised. If words appear, please report how your hands were resting |
 | 6 | Start a sign, then lean out of the camera's view | No word is added, and the status asks you to move back |
 | 7 | Sign while the status says `Speaking...` | Ignored |
-| 8 | Press **Esc** (or close the window) | The app closes |
+| 8 | Lean in until the camera only sees your head and shoulders | The status says `Move back or tilt the camera down`; it goes away when you sit back |
+| 9 | Press **Esc** (or close the window) | The app closes |
 
 ### Word coverage (optional, 10 minutes)
 
 Try 10 more words from the list. Known weak spots: **priest**, **fall** and **shop** often don't register, and
-**boy** and **girl** get confused with each other.
+**court** and **hot** are sometimes read as "shop". Your own way of signing a word may differ from the reference
+video's; for example, a salute-style "hello" tends to come out as "boy".
 
 ## What to send back
 
-1. The results of checks 1–8 (pass, or what happened instead)
+1. The results of checks 1–9 (pass, or what happened instead)
 2. For each word you tried:
 
    | Word signed | What appeared (word and %, `? maybe: ...`, or nothing) | Correct? |
@@ -139,6 +142,7 @@ Try 10 more words from the list. Known weak spots: **priest**, **fall** and **sh
 | `Could not open the webcam` | Close other apps using the camera (Teams, Zoom, Camera). In Windows Settings → Privacy & security → Camera, allow desktop apps |
 | `Could not download the MediaPipe model ...` | Check your internet, or download the file from the URL shown and save it where the message says |
 | `(no reply - see the console for the error)` | Read the `Chatbot error:` line in the terminal: usually a wrong key, no internet, or Groq's free rate limit (wait a minute) |
+| `Move back or tilt the camera down` | The camera sees too little below your shoulders, which makes recognition worse. Tilt the screen or move back until the message goes away |
 | `No example video for ...` | The videos ZIP isn't in place: check that `data\examples\` exists (step 1) |
 | `pip install` fails on tensorflow | Wrong Python version: use 3.10–3.12 (step 2) |
 | No sound | Check Windows' default audio output and volume |

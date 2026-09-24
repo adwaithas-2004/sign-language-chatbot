@@ -16,17 +16,30 @@ Official INCLUDE-50 test split: 192 videos (trained on 689, validated on 77).
 | Model | Top-1 | Top-3 | Macro-F1 |
 |---|---|---|---|
 | Baseline: logistic regression on summary features (deterministic) | 94.3% | 97.9% | 0.934 |
-| BiGRU on landmark sequences, mean ± std over 5 training runs | 95.5% ± 0.8 | 99.0% ± 0.5 | 0.953 ± 0.008 |
-| **BiGRU, saved model** (best validation accuracy of the 5 runs) | **96.4%** | 98.4% | 0.962 |
+| BiGRU on landmark sequences, mean ± std over 5 training runs | 96.1% ± 1.1 | 98.8% ± 0.3 | 0.958 ± 0.011 |
+| **BiGRU, saved model** (best validation accuracy of the 5 runs) | **97.4%** | 99.0% | 0.972 |
 | INCLUDE paper, best model on INCLUDE-50 | 94.5% | – | – |
 
-Averaged over 5 runs, the BiGRU scores +1.3 points top-1 against the baseline (run-to-run standard deviation 0.8 points).
+Averaged over 5 runs, the BiGRU scores +1.9 points top-1 against the baseline (run-to-run standard deviation 1.1 points).
 
-BiGRU inference: 4.7 ms per sign on CPU. Hardest words for the saved model: girl (50%), court (67%), fall (67%), boy (75%), hot (83%).
+BiGRU inference: 5.1 ms per sign on CPU. Hardest words for the saved model: court (67%), fall (67%), shop (75%), hot (83%), train ticket (88%).
 
 INCLUDE's 7 signers appear in every split, so these are *seen-signer* results. Accuracy for a new signer and camera will be lower.
 
-**Live path:** replaying the 192 test videos through the app's own segmenter and model gives **93.2%** top-1. 6 videos never started a sign and 0 were split into several. The gap to the offline number is the segmenter: MediaPipe sometimes loses a fast-moving hand for most of a sign, and a few words are signed low. Words that start a sign in under 80% of their videos: priest (20%), fall (60%), shop (64%).
+**Live path:** replaying the 192 test videos through the app's own segmenter and model gives **94.3%** top-1. 6 videos never started a sign and 0 were split into several. The gap to the offline number is the segmenter: MediaPipe sometimes loses a fast-moving hand for most of a sign, and a few words are signed low. Words that start a sign in under 80% of their videos: priest (20%), fall (60%), shop (64%).
+
+**Desk webcams:** INCLUDE's signers stand far from the camera, but a webcam at a desk often sees only down to the
+chest. The model is trained on randomly narrowed views of the videos as well, and the live app points out a camera
+that's too close. Live-path top-1 on the same test videos, cropped to what a closer camera sees (the last column
+is the previous model, which kept MediaPipe's guesses for out-of-view arms):
+
+| Camera sees below the shoulders | Live top-1 | Before close-view training |
+|---|---|---|
+| Full view | 94.3% | 93.2% |
+| 1.4 shoulder widths (about the waist) | 95.8% | 88.5% |
+| 0.9 (lower chest, typical at a desk) | 94.3% | 87.5% |
+| 0.6 (chest) | 90.6% | 81.8% |
+| 0.3 (just below the shoulders) | 75.5% | 67.2% |
 
 ![Confusion matrix](reports/confusion_matrix.png)
 
@@ -36,7 +49,9 @@ INCLUDE's 7 signers appear in every split, so these are *seen-signer* results. A
 2. Sign more words the same way.
 3. Keep your hands down for 2 seconds. The ring fills up, the sentence is sent, and the bot says it out loud (`Said:`).
 
-**Backspace** removes the last word; **Esc** or closing the window quits. Sit so your shoulders are in view.
+**Backspace** removes the last word; **Esc** or closing the window quits. Sit so the camera sees you from a little
+above your head down to at least your chest, ideally your waist (at a laptop, tilting the screen changes this). If
+the status says "Move back or tilt the camera down", the camera is too close.
 Words the model isn't sure about show as "? maybe: ..." and aren't added.
 
 To learn how a word is signed, play its reference video: `python -m isl.examples thank you`
@@ -101,9 +116,12 @@ mean and spread, and saves the run with the best **validation** accuracy. The te
   or 0.8 s after they leave the camera's view (MediaPipe briefly loses fast-moving hands, so short gaps are
   bridged).
 - Priest, fall and shop often don't start a sign in the live app (see the live-path results above).
-- The saved model's 7 test mistakes: boy ↔ girl (both ways), court → shop, hot → shop, dog → long, fall → it,
-  train ticket → teacher. A simple baseline already reaches 94.3%, so most of the accuracy comes from the
-  body-normalised landmark features; the BiGRU adds about 1.3 points on average.
+- The saved model's 5 test mistakes: court → shop, hot → shop, shop → bird, fall → it, train ticket → brother.
+  A simple baseline already reaches 94.3%, so most of the accuracy comes from the body-normalised landmark features;
+  the BiGRU adds about 1.9 points on average.
+- A new signer's way of making a sign can differ from INCLUDE's signers'. In a live test at a desk, a forehead-salute
+  "hello" was mostly read as "boy" (a flat hand near the face). Fine-tuning on a few recordings of your own signs
+  would fix that; it isn't built yet.
 
 ## Credits
 

@@ -9,7 +9,7 @@ import pyttsx3
 from dotenv import load_dotenv
 from groq import APIError, Groq
 
-from isl.features import frame_features
+from isl.features import frame_features, view_below_shoulders
 from isl.landmarks import LandmarkExtractor
 from isl.model import load_recogniser
 from isl.segmenter import Segmenter
@@ -31,6 +31,9 @@ WORD_THRESHOLD = 0.5  # Only accept a recognised word the model gives at least t
 SEND_AFTER_SECONDS = 2.0  # Stop signing this long to send the sentence
 WORD_DISPLAY_SECONDS = 3.0  # How long the last recognised word stays on screen
 BACKSPACE, ESC = 8, 27
+# A camera that sees less than this many shoulder widths below the shoulders is too close: recognition drops off
+# (see the closer-cameras table in reports/live_path.md)
+MIN_VIEW_BELOW_SHOULDERS = 0.6
 
 WINDOW_NAME = "Sign Language Recognition"
 FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -208,13 +211,21 @@ def draw_skeleton(display, raw):
             cv2.circle(display, point(x, y), 3, YELLOW, -1)
 
 
-def status_text(busy_status, body_found, signing, has_words):
+def camera_too_close(raw):
+    """Whether the camera sees too little of the body below the shoulders to recognise signs well"""
+    view = view_below_shoulders(raw)
+    return view is not None and view < MIN_VIEW_BELOW_SHOULDERS
+
+
+def status_text(busy_status, body_found, signing, has_words, too_close=False):
     if busy_status:
         return busy_status
     if not body_found:
         return "Move back so your shoulders are visible"
     if signing:
         return "Signing..."
+    if too_close:
+        return "Move back or tilt the camera down"
     if has_words:
         return "Pause to send, or sign the next word"
     return "Sign a word"
@@ -279,7 +290,7 @@ def main():
                 if responder.reply:
                     captions.append("Said: " + responder.reply)
             status = status_text(responder.status if responder.busy else "", body_found, segmenter.signing,
-                                 bool(builder.words))
+                                 bool(builder.words), camera_too_close(raw))
             recent = now - last_word_time < WORD_DISPLAY_SECONDS
             draw_overlay(display, last_word if recent else "", last_word_ok, builder.progress(now), status,
                          captions)

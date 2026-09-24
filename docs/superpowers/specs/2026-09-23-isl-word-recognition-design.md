@@ -152,7 +152,11 @@ Per frame, from `RawLandmarks` (all coordinates in **pixels**, which removes the
     wrist (point 0) scaled by wrist → middle-finger knuckle (point 9) distance = 42 → 84 × 2 = 168
   - presence flag per hand = 2
   - a missing hand's block is zeros with presence 0
+  - a pose point other than the shoulders that is outside the image or has visibility < 0.5 is left as (0, 0):
+    MediaPipe only guesses where out-of-view arms are (added with close-view training, `FEATURE_VERSION = 2`)
 - `frame_features(raw) -> (features, body_found)`.
+- `view_below_shoulders(raw)`: how many shoulder widths below the shoulders the image reaches, for the live app's
+  framing hint.
 - **Hands up:** `hands_up(features)` is true when at least one hand is present with its wrist above
   `shoulder_mid_y + HANDS_UP_K × shoulder_width` (image y grows downwards). It is computed **from the feature vector**
   (for one frame or a whole sequence), so changing `HANDS_UP_K` never requires re-extracting videos.
@@ -201,6 +205,14 @@ Expected cost: ~15 GB download, ~1–1.5 hours in total.
   (patience 25, restore best weights), fixed seeds.
 - **Augmentation** (`isl/augment.py`, training batches only): random flip (p = 0.5), scale ±10 %, rotation ±10°,
   speed change and crop ±15 % before resampling, random frame dropout, Gaussian noise.
+- **Close-view training** (added after live testing at a desk): INCLUDE's signers stand far from the camera, while a
+  desk webcam often sees only down to the chest, which dropped live-path accuracy from 93 % to 62-88 %. With
+  p = 0.6, each whole training clip is first seen through a random closer camera (`crop_view`: sees 0.2-2.2 shoulder
+  widths below the shoulders, 0.9-2.0 above, 0.8-2.0 to each side); hands outside that view vanish and body points
+  outside it are emptied, as the live features do. Then it's trimmed like the live app and augmented as above.
+  Validation also includes each val clip at two closer views (0.6 and 1.0 below the shoulders), so the saved run is
+  chosen for both. The prepared landmarks predate the emptied body points, but in INCLUDE's full-body videos those
+  points are almost always in view, so they match closely.
 - **Evaluation** on the official **test** split for both models: top-1, top-3, macro-F1 (over the words present in
   the test split), per-word accuracy, inference time per sign.
 - **Writes:** `models/isl50_bigru.keras`, `models/labels.json`, `reports/metrics.json`,
@@ -240,6 +252,9 @@ Loop: read frame → `LandmarkExtractor` on the **un-mirrored** frame → featur
   - a ring counting down to send
   - hand and arm skeleton overlay
   - `Signed:` / `Said:` captions
+- **Framing hint:** when the camera sees less than `MIN_VIEW_BELOW_SHOULDERS = 0.6` shoulder widths below the
+  shoulders, the status reads "Move back or tilt the camera down" (unless busy or signing).
+  `scripts/evaluate_live.py` reports live-path accuracy for such closer views.
 - **Kept unchanged:** `Responder`, `interpret()`, `speak()`, the Groq setup and `.env` handling, `wrap_text`,
   `shade`.
 - **Removed:** `SignTracker`, `preprocess`, `MIRROR` for model input, the Teachable Machine loading code.
@@ -296,6 +311,8 @@ Loop: read frame → `LandmarkExtractor` on the **un-mirrored** frame → featur
 
 - **Seen-signer test set:** INCLUDE has 7 signers shared across the splits, so test accuracy overstates accuracy on
   a new signer. The README says so. Fine-tuning on the user's own recordings is the follow-up.
+- **Camera framing:** the model learned from standing, full-body videos. Close-view training and the framing hint
+  cover desk webcams; `reports/live_path.md` shows accuracy by how much of the body the camera sees.
 - **Hands-up threshold:** it may need tuning per camera setup. It's a named constant, calibrated on INCLUDE and
   checked live.
 - **Download reliability:** Zenodo throttling or timeouts are handled by retries in `RemoteZip` and the resumable

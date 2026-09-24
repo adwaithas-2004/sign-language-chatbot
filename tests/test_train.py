@@ -6,7 +6,9 @@ from unittest import mock
 
 import numpy as np
 
+from isl import features as F
 from isl.model import load_recogniser
+from tests.fakes import frame, make_raw
 from tests.test_prepare import load_script
 
 train = load_script("train")
@@ -28,6 +30,27 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(summary["top1_std"], 0.0707, places=4)  # sample standard deviation
         self.assertAlmostEqual(summary["top3_std"], 0.0)
         self.assertAlmostEqual(summary["macro_f1_mean"], 0.7)
+
+
+class TrainingDataTests(unittest.TestCase):
+    def test_training_inputs_are_seen_through_random_closer_cameras(self):
+        # a sign made at waist height (wrists 1.4 shoulder widths down) is out of view for the closer cameras
+        clip = np.stack([F.frame_features(make_raw("both", wrist_y=340))[0]] * 20)
+        rng = np.random.default_rng(0)
+        outs = [train.training_sequence(clip, rng) for _ in range(200)]
+        self.assertTrue(all(out.shape == (32, 184) for out in outs))
+        no_hands = sum(not out[:, F.PRESENCE_SLICE].any() for out in outs)
+        self.assertTrue(30 < no_hands < 120, no_hands)
+
+    def test_validation_covers_the_full_view_and_closer_views(self):
+        lowered = F.frame_features(make_raw("both", wrist_y=400))[0]
+        clips = [np.stack([lowered] * 5 + [frame(True)] * 10 + [lowered] * 5)] * 2
+        X, y = train.validation_set(clips, np.array([3, 4]))
+        views = 1 + len(train.VAL_VIEWS)
+        self.assertEqual(X.shape, (2 * views, 32, 184))
+        np.testing.assert_array_equal(y, np.tile([3, 4], views))
+        np.testing.assert_allclose(X[0], F.to_sequence(clips[0]))
+        self.assertFalse(np.allclose(X[2], X[0]))  # a closer camera loses the lowered hands
 
 
 class TrainSmokeTests(unittest.TestCase):

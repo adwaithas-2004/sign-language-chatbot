@@ -33,6 +33,30 @@ class FrameFeatureTests(unittest.TestCase):
         both = F.frame_features(make_raw("both"))[0]  # listed right-then-left, must still land left-then-right
         np.testing.assert_allclose(both[F.HAND_SLICES[1]], vector[F.HAND_SLICES[1]])
 
+    def test_body_points_outside_the_image_are_left_empty(self):
+        # A close webcam cuts off the lowered arms, and MediaPipe only guesses where they are
+        pose = F.frame_features(make_raw("none", wrist_y=500))[0][F.POSE_SLICE].reshape(7, 2)  # image is 480 high
+        self.assertFalse(pose[5:7].any())  # wrists
+        self.assertTrue(pose[3:5].any())  # elbows are in view
+
+    def test_barely_visible_body_points_are_left_empty(self):
+        raw = make_raw("none")
+        raw.pose[13, 2] = 0.1  # the subject's left elbow
+        pose = F.frame_features(raw)[0][F.POSE_SLICE].reshape(7, 2)
+        self.assertFalse(pose[3].any())
+        self.assertTrue(pose[4].any() and pose[0].any())
+
+    def test_the_shoulders_are_always_kept(self):
+        raw = make_raw("none")
+        raw.pose[12, 0] = -5  # the subject's right shoulder just past the image edge, but clearly detected
+        pose = F.frame_features(raw)[0][F.POSE_SLICE].reshape(7, 2)
+        self.assertTrue(pose[1].any() and pose[2].any())
+
+    def test_view_below_the_shoulders(self):
+        self.assertAlmostEqual(F.view_below_shoulders(make_raw("both")), 2.8)  # (480 - 200) / 100
+        self.assertIsNone(F.view_below_shoulders(make_raw("both", visibility=0.2)))
+        self.assertIsNone(F.view_below_shoulders(RawLandmarks(pose=None, hands=[], width=640, height=480)))
+
     def test_hidden_shoulders_give_an_empty_invalid_frame(self):
         vector, found = F.frame_features(make_raw("both", visibility=0.2))
         self.assertFalse(found)

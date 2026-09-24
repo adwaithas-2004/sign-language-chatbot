@@ -65,6 +65,18 @@ class StatusTextTests(unittest.TestCase):
         self.assertIn("Pause to send", signlan.status_text("", True, False, True))
         self.assertEqual(signlan.status_text("", True, False, False), "Sign a word")
 
+    def test_a_camera_that_is_too_close_is_pointed_out_unless_busy_or_signing(self):
+        hint = "Move back or tilt the camera down"
+        self.assertEqual(signlan.status_text("", True, False, True, too_close=True), hint)
+        self.assertEqual(signlan.status_text("", True, True, False, too_close=True), "Signing...")
+        self.assertEqual(signlan.status_text("Speaking...", True, False, False, too_close=True), "Speaking...")
+
+    def test_too_close_means_the_camera_sees_little_below_the_shoulders(self):
+        raw = make_raw("both")  # shoulders at y 200, 100 px apart
+        self.assertFalse(signlan.camera_too_close(raw))  # sees 2.8 shoulder widths below them
+        self.assertTrue(signlan.camera_too_close(RawLandmarks(raw.pose, raw.hands, width=640, height=240)))  # 0.4
+        self.assertFalse(signlan.camera_too_close(RawLandmarks(None, [], width=640, height=240)))  # no body: other hint
+
 
 class SkeletonTests(unittest.TestCase):
     def test_skeleton_is_drawn_mirrored(self):

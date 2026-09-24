@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from isl import features as F
-from isl.augment import augment, rotate_scale
+from isl.augment import augment, crop_view, random_view, rotate_scale
 from tests.fakes import frame, make_raw
 
 
@@ -39,3 +39,46 @@ class AugmentTests(unittest.TestCase):
         np.testing.assert_allclose(np.linalg.norm(out[:, local].reshape(3, 21, 2), axis=2),
                                    np.linalg.norm(seq[:, local].reshape(3, 21, 2), axis=2), rtol=1e-5, atol=1e-6)
         np.testing.assert_array_equal(out[:, F.PRESENCE_SLICE], seq[:, F.PRESENCE_SLICE])
+
+
+class ViewTests(unittest.TestCase):
+    """Simulated closer cameras, which only see part of the body"""
+
+    def setUp(self):
+        lowered = F.frame_features(make_raw("both", wrist_y=400))[0]  # wrists 2 shoulder widths below the shoulders
+        self.clip = np.stack([lowered] * 3 + [frame(True)] * 3)  # then raised: wrists 0.5 above, fingertips ~0.77
+
+    def test_hands_below_the_view_vanish(self):
+        out = crop_view(self.clip, bottom=1.0, top=-2.0, half_width=2.0)
+        self.assertFalse(out[:3, F.PRESENCE_SLICE].any())
+        self.assertFalse(out[:3, F.HAND_SLICES[0]].any() or out[:3, F.HAND_SLICES[1]].any())
+        np.testing.assert_array_equal(out[3:], self.clip[3:])
+
+    def test_body_points_outside_the_view_are_emptied_but_not_the_shoulders(self):
+        pose = crop_view(self.clip, 1.0, -2.0, 2.0)[:3, F.POSE_SLICE].reshape(3, 7, 2)
+        self.assertFalse(pose[:, 5:7].any())  # wrists
+        np.testing.assert_array_equal(pose[:, :5], self.clip[:3, F.POSE_SLICE].reshape(3, 7, 2)[:, :5])
+
+    def test_a_hand_reaching_above_the_view_vanishes(self):
+        self.assertFalse(crop_view(self.clip, 3.0, -0.7, 2.0)[3:, F.PRESENCE_SLICE].any())
+        self.assertTrue(crop_view(self.clip, 3.0, -0.9, 2.0)[3:, F.PRESENCE_SLICE].all())
+
+    def test_hands_and_body_points_beside_the_view_vanish(self):
+        out = crop_view(self.clip, 3.0, -2.0, 0.65)  # wrists are 0.7 from the middle, elbows 0.6
+        self.assertFalse(out[:, F.PRESENCE_SLICE].any())
+        pose = out[:, F.POSE_SLICE].reshape(-1, 7, 2)
+        self.assertFalse(pose[:, 5:7].any())
+        self.assertTrue(pose[:, 3:5].all())
+
+    def test_the_input_is_not_changed(self):
+        before = self.clip.copy()
+        crop_view(self.clip, 1.0, -0.7, 0.65)
+        np.testing.assert_array_equal(self.clip, before)
+
+    def test_random_views_crop_some_clips_and_leave_others_whole(self):
+        rng = np.random.default_rng(0)
+        outs = [random_view(self.clip, rng) for _ in range(200)]
+        whole = sum(np.array_equal(out, self.clip) for out in outs)
+        self.assertTrue(40 < whole < 160, whole)
+        for out in outs:
+            np.testing.assert_array_equal(out[:, 2:6], self.clip[:, 2:6])  # the shoulders

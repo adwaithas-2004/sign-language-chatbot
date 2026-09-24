@@ -16,8 +16,8 @@ sys.path.insert(0, str(ROOT))
 import keras  # noqa: E402
 
 from isl import include_data  # noqa: E402
-from isl.augment import augment  # noqa: E402
-from isl.features import NUM_FEATURES, hands_up, resample, trim  # noqa: E402
+from isl.augment import augment, crop_view, random_view  # noqa: E402
+from isl.features import NUM_FEATURES, raised_part, to_sequence  # noqa: E402
 from isl.model import Recogniser, build_model, save_labels  # noqa: E402
 
 LANDMARKS_DIR = include_data.DATA_DIR / "landmarks"
@@ -25,10 +25,14 @@ PAPER_TOP1 = 0.945  # best INCLUDE-50 result reported in the INCLUDE paper
 SEED = 42
 BATCH_SIZE = 32
 PATIENCE = 25
+# Validation also sees each clip through closer cameras (how far below the shoulders each one sees), so the saved
+# run is the one that copes best with both full and desk-webcam views
+VAL_VIEWS = (0.6, 1.0)
+VAL_VIEW_TOP, VAL_VIEW_HALF_WIDTH = -1.5, 1.5
 
 
 def load_clips(landmarks_dir, keys):
-    """{split: (list of trimmed (T, F) clips, labels)} from the prepared .npz files"""
+    """{split: (list of whole (T, F) clips, labels)} from the prepared .npz files"""
     index = {key: i for i, key in enumerate(keys)}
     clips = {}
     for split in ("train", "val", "test"):
@@ -36,7 +40,7 @@ def load_clips(landmarks_dir, keys):
         for path in sorted((Path(landmarks_dir) / split).glob("*/*.npz")):
             with np.load(path) as data:
                 features = data["features"]
-            frames.append(trim(features, hands_up(features)))
+            frames.append(features)
             labels.append(index[path.parent.name])
         clips[split] = (frames, np.array(labels, dtype=np.int64))
     return clips
@@ -79,12 +83,24 @@ def predict(model, X):
     return np.asarray(model.predict(X, batch_size=64, verbose=0))
 
 
+def training_sequence(clip, rng):
+    """One model input for training: the whole clip seen by a random camera, trimmed like the live app, then varied"""
+    return augment(raised_part(random_view(clip, rng)), rng)
+
+
+def validation_set(clips, labels):
+    """Validation inputs for the full view followed by each closer view in VAL_VIEWS"""
+    views = [clips] + [[crop_view(clip, bottom, VAL_VIEW_TOP, VAL_VIEW_HALF_WIDTH) for clip in clips]
+                       for bottom in VAL_VIEWS]
+    return np.stack([to_sequence(clip) for view in views for clip in view]), np.tile(labels, len(views))
+
+
 def train_bigru(train_clips, y_train, X_val, y_val, num_classes, epochs, rng):
     """Fresh augmentations every epoch; keeps the weights with the best validation accuracy"""
     model = build_model(num_classes)
     best_accuracy, best_weights, best_epoch, since_best = -1.0, model.get_weights(), 0, 0
     for epoch in range(1, epochs + 1):
-        X = np.stack([augment(clip, rng) for clip in train_clips])
+        X = np.stack([training_sequence(clip, rng) for clip in train_clips])
         history = model.fit(X, y_train, batch_size=BATCH_SIZE, epochs=1, shuffle=True, verbose=0)
         val_accuracy = float(np.mean(predict(model, X_val).argmax(1) == y_val))
         if val_accuracy > best_accuracy:
@@ -198,16 +214,17 @@ def main(argv=None):
     if not all(counts.values()):
         raise SystemExit("No prepared landmarks found. Run: python scripts/prepare_include50.py")
 
-    X = {split: np.stack([resample(clip) for clip in clips[split][0]]) for split in clips}
+    X = {split: np.stack([to_sequence(clip) for clip in clips[split][0]]) for split in clips}
     y = {split: clips[split][1] for split in clips}
 
     baseline = train_baseline(X["train"], y["train"])  # deterministic, so trained once
+    X_val, y_val = validation_set(*clips["val"])
 
     # One BiGRU run can be lucky or unlucky, so train several and report the spread
     runs, best = [], None
     for seed in range(SEED, SEED + args.seeds):
         keras.utils.set_random_seed(seed)
-        model, best_epoch, val_accuracy = train_bigru(clips["train"][0], y["train"], X["val"], y["val"], len(keys),
+        model, best_epoch, val_accuracy = train_bigru(clips["train"][0], y["train"], X_val, y_val, len(keys),
                                                       epochs, np.random.default_rng(seed))
         test_probabilities = predict(model, X["test"])
         result = metrics(test_probabilities, y["test"], keys)

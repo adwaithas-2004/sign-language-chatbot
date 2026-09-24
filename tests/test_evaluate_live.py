@@ -5,7 +5,8 @@ from unittest import mock
 
 import numpy as np
 
-from tests.fakes import frame
+from isl.features import frame_features
+from tests.fakes import frame, make_raw
 from tests.test_prepare import load_script
 
 evaluate_live = load_script("evaluate_live")
@@ -40,3 +41,20 @@ class LiveReplayTests(unittest.TestCase):
         self.assertAlmostEqual(result["top1"], 0.5)
         self.assertEqual(result["trigger_rate"], {"bank": 0.5, "hello": 1.0})
         self.assertIn("bank (50%)", evaluate_live.live_markdown(result, recogniser))
+
+    def test_accuracy_for_closer_cameras(self):
+        recogniser = mock.Mock(keys=["hello"], display=["hello"])
+        recogniser.predict.return_value = [("hello", 0.9)]
+        low = frame_features(make_raw("both", wrist_y=340))[0]  # signed at waist height: 1.4 below the shoulders
+        with tempfile.TemporaryDirectory() as tmp:
+            save_clip(tmp, "test", "hello", [frame(False)] * 10 + [frame(True)] * 20 + [frame(False)] * 5)
+            save_clip(tmp, "test", "hello", [frame(False)] * 10 + [low] * 20 + [frame(False)] * 5)
+            views = evaluate_live.view_accuracy(tmp, recogniser, (1.0,))
+        # a camera that only sees 1.0 below the shoulders misses the low sign
+        self.assertEqual(views, [{"view_below_shoulders": None, "top1": 1.0},
+                                 {"view_below_shoulders": 1.0, "top1": 0.5}])
+        result = {"test_clips": 2, "top1": 1.0, "no_sign": 0, "several_signs": 0, "trigger_rate": {"hello": 1.0},
+                  "closer_views": views}
+        report = evaluate_live.live_markdown(result, recogniser)
+        self.assertIn("| full view | 100.0% |", report)
+        self.assertIn("| 1.0 | 50.0% |", report)

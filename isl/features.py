@@ -3,13 +3,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-FEATURE_VERSION = 1
+FEATURE_VERSION = 2  # 2: body points out of view are left empty
 SEQUENCE_LENGTH = 32  # frames per sign given to the model
 
 # MediaPipe pose indices
 NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_WRIST, RIGHT_WRIST = 0, 11, 12, 13, 14, 15, 16
 POSE_POINTS = (NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_WRIST, RIGHT_WRIST)
 _POSE_MIRROR = [0, 2, 1, 4, 3, 6, 5]  # POSE_POINTS order with left and right swapped
+SHOULDER_POINTS = (1, 2)  # positions of the shoulders in POSE_POINTS
 MIN_VISIBILITY = 0.5
 # A wrist less than this many shoulder-widths below the shoulders counts as a raised hand when trimming a sign
 # to the part the model sees. Calibrated on the INCLUDE-50 train split: resting wrists sit at 1.53-1.81, so 1.25
@@ -47,18 +48,38 @@ def _assign_hands(hands, pose):
     return [a, b] if straight <= swapped else [b, a]
 
 
+def _body_frame(pose):
+    """(origin, scale) of the body frame: the shoulder midpoint and shoulder width, or None without clear shoulders"""
+    if pose is None or min(pose[LEFT_SHOULDER, 2], pose[RIGHT_SHOULDER, 2]) < MIN_VISIBILITY:
+        return None
+    left, right = pose[LEFT_SHOULDER, :2], pose[RIGHT_SHOULDER, :2]
+    scale = float(np.linalg.norm(left - right))
+    return ((left + right) / 2, scale) if scale >= 1e-3 else None
+
+
+def view_below_shoulders(raw):
+    """How many shoulder widths below the shoulders the camera sees, or None without a body"""
+    frame = _body_frame(raw.pose)
+    return None if frame is None else float((raw.height - frame[0][1]) / frame[1])
+
+
 def frame_features(raw):
     """(feature vector, body found) for one frame; the vector is all zeros when the shoulders aren't visible"""
     features = np.zeros(NUM_FEATURES, dtype=np.float32)
     pose = raw.pose
-    if pose is None or min(pose[LEFT_SHOULDER, 2], pose[RIGHT_SHOULDER, 2]) < MIN_VISIBILITY:
+    frame = _body_frame(pose)
+    if frame is None:
         return features, False
-    left, right = pose[LEFT_SHOULDER, :2], pose[RIGHT_SHOULDER, :2]
-    origin, scale = (left + right) / 2, float(np.linalg.norm(left - right))
-    if scale < 1e-3:
-        return features, False
+    origin, scale = frame
 
-    features[POSE_SLICE] = ((pose[list(POSE_POINTS), :2] - origin) / scale).ravel()
+    points = pose[list(POSE_POINTS)]
+    body = (points[:, :2] - origin) / scale
+    # MediaPipe guesses where out-of-view arms are; leave those points empty rather than feed the guess to the model
+    x, y, visibility = points[:, 0], points[:, 1], points[:, 2]
+    hidden = (visibility < MIN_VISIBILITY) | (x < 0) | (x > raw.width) | (y < 0) | (y > raw.height)
+    hidden[list(SHOULDER_POINTS)] = False  # the shoulders define the body frame
+    body[hidden] = 0
+    features[POSE_SLICE] = body.ravel()
     for i, hand in enumerate(_assign_hands(raw.hands, pose)):
         if hand is None:
             continue
@@ -105,10 +126,15 @@ def resample(frames, length=SEQUENCE_LENGTH):
     return frames[lower] * (1 - weight) + frames[upper] * weight
 
 
+def raised_part(frames):
+    """The part of a sign's frames with the hands up (plus padding), as the model sees it"""
+    frames = np.asarray(frames, dtype=np.float32)
+    return trim(frames, hands_up(frames))
+
+
 def to_sequence(frames):
     """Model input for one sign: trimmed to the raised-hands part and resampled"""
-    frames = np.asarray(frames, dtype=np.float32)
-    return resample(trim(frames, hands_up(frames)))
+    return resample(raised_part(frames))
 
 
 def flip(sequence):
