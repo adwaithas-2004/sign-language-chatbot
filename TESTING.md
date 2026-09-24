@@ -53,7 +53,7 @@ These need no webcam, key or internet:
 Expected, at the end:
 
 ```
-Ran 82 tests in ...s
+Ran 97 tests in ...s
 
 OK (skipped=2)
 ```
