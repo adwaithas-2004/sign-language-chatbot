@@ -44,7 +44,7 @@ To learn how a word is signed, play its reference video: `python -m isl.examples
 
 ## Setup (Windows)
 
-Requires **Python 3.9 – 3.12**.
+Requires **Python 3.10 – 3.12**.
 
 ```bash
 py -3.12 -m venv .venv
@@ -59,7 +59,7 @@ Copy `.env.example` to `.env` and paste your free key from https://console.groq.
 python signlan.py
 ```
 
-The trained model is in `models/`, so the app works without the dataset.
+The trained model is in `models/`, so the app works without the dataset. Step-by-step testing: [TESTING.md](TESTING.md).
 
 ## Reproducing the model
 

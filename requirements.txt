@@ -1,4 +1,4 @@
-# Needs Python 3.9 - 3.12 (TensorFlow 2.18 has no wheels for 3.13+)
+# Needs Python 3.10 - 3.12 (TensorFlow 2.18 has no wheels for 3.13+)
 tensorflow==2.18.0
 mediapipe==1.0.1
 opencv-contrib-python>=4.8
